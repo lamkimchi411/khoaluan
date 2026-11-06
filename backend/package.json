@@ -1,0 +1,26 @@
+{
+  "name": "brandpulse-backend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env --watch server/index.js",
+    "start": "node --env-file-if-exists=.env server/index.js",
+    "dev:nlp": "python python/service.py",
+    "test": "node --test tests/*.test.js",
+    "test:integration": "node tests/integration.mjs",
+    "migrate:postgres": "node --env-file=.env scripts/migrate-sqlite-to-postgres.mjs",
+    "check:postgres": "node --env-file=.env scripts/check-postgres.mjs",
+    "migrate:mysql": "node --env-file-if-exists=.env scripts/migrate-sqlite-to-mysql.mjs",
+    "check:mysql": "node --env-file-if-exists=.env scripts/check-mysql.mjs",
+    "test:mysql": "node --env-file-if-exists=.env tests/integration.mjs --mysql",
+    "migrate:neon": "node --env-file-if-exists=.env scripts/migrate-mysql-to-neon.mjs",
+    "check:neon": "node --env-file-if-exists=.env scripts/check-neon.mjs",
+    "test:neon": "node --env-file-if-exists=.env tests/integration.mjs --postgres"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "mysql2": "^3.24.6",
+    "pg": "^8.16.3"
+  }
+}

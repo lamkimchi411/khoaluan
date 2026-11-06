@@ -1,0 +1,19 @@
+{
+  "name": "brandpulse-workspace",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:backend\" \"npm:dev:frontend\" \"npm:dev:nlp\"",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "dev:backend": "npm --prefix backend run dev",
+    "dev:nlp": "npm --prefix backend run dev:nlp",
+    "build": "npm --prefix frontend run build",
+    "test": "npm --prefix backend test",
+    "test:integration": "npm --prefix backend run test:integration"
+  },
+  "dependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "devDependencies": {}
+}

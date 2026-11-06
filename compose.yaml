@@ -1,0 +1,36 @@
+services:
+  api:
+    build: ./backend
+    ports:
+      - "127.0.0.1:3001:3001"
+    environment:
+      NLP_URL: http://nlp:8001
+      DB_DRIVER: sqlite
+      DB_PATH: /app/data/brandpulse.db
+      PYTHON_BIN: /opt/venv/bin/python
+      INGEST_TOKEN: ${INGEST_TOKEN:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+    volumes:
+      - brandpulse-data:/app/data
+    depends_on:
+      - nlp
+    init: true
+  nlp:
+    build: ./backend
+    command: ["python", "python/service.py"]
+    init: true
+  frontend:
+    build: ./frontend
+    ports:
+      - "127.0.0.1:5173:5173"
+    environment:
+      VITE_API_PROXY: http://api:3001
+    depends_on:
+      - api
+volumes:
+  brandpulse-data:
