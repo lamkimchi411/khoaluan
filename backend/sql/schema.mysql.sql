@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS brands (
   keywords TEXT NOT NULL,
   threshold DOUBLE NOT NULL DEFAULT 40,
   email VARCHAR(1000) NOT NULL DEFAULT '',
-  telegram VARCHAR(1000) NOT NULL DEFAULT ''
+  telegram VARCHAR(1000) NOT NULL DEFAULT '',
+  facebook_page_id VARCHAR(30) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS posts (
@@ -15,7 +16,7 @@ CREATE TABLE IF NOT EXISTS posts (
   views BIGINT, likes BIGINT, comment_count BIGINT, shares BIGINT, saves BIGINT,
   video_url VARCHAR(1000) NOT NULL DEFAULT '', sentiment TEXT, score DOUBLE,
   created_at VARCHAR(40) NOT NULL, observed_at VARCHAR(40), published_at VARCHAR(40),
-  source VARCHAR(1000) NOT NULL DEFAULT 'live', collection_method TEXT, evidence_sha256 TEXT,
+  source VARCHAR(1000) NOT NULL DEFAULT 'live', platform VARCHAR(20) NOT NULL DEFAULT 'tiktok', collection_method TEXT, evidence_sha256 TEXT,
   hashtags TEXT, comment_status TEXT, discovery_keyword TEXT,
   UNIQUE(video_id, brand_id),
   FOREIGN KEY (brand_id) REFERENCES brands(id),
@@ -26,7 +27,7 @@ CREATE TABLE IF NOT EXISTS comments (
   id VARCHAR(191) COLLATE utf8mb4_bin NOT NULL,
   post_id BIGINT NOT NULL,
   text TEXT NOT NULL, author VARCHAR(1000) NOT NULL DEFAULT '', author_nickname TEXT,
-  parent_id TEXT, like_count BIGINT, sentiment TEXT, score DOUBLE,
+  parent_id TEXT, like_count BIGINT, sentiment TEXT, score DOUBLE, topic VARCHAR(50) NOT NULL DEFAULT 'other', toxicity_score DOUBLE NOT NULL DEFAULT 0, confidence DOUBLE NOT NULL DEFAULT 0, analysis_evidence TEXT,
   created_at VARCHAR(40) NOT NULL, published_at VARCHAR(40),
   PRIMARY KEY(id, post_id),
   FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE

@@ -4,7 +4,8 @@ CREATE TABLE IF NOT EXISTS brands (
   keywords TEXT NOT NULL,
   threshold DOUBLE PRECISION NOT NULL DEFAULT 40,
   email TEXT NOT NULL DEFAULT '',
-  telegram TEXT NOT NULL DEFAULT ''
+  telegram TEXT NOT NULL DEFAULT '',
+  facebook_page_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS posts (
@@ -15,7 +16,7 @@ CREATE TABLE IF NOT EXISTS posts (
   views BIGINT, likes BIGINT, comment_count BIGINT, shares BIGINT, saves BIGINT,
   video_url TEXT NOT NULL DEFAULT '', sentiment TEXT, score DOUBLE PRECISION,
   created_at TIMESTAMPTZ NOT NULL, observed_at TIMESTAMPTZ, published_at TIMESTAMPTZ,
-  source TEXT NOT NULL DEFAULT 'live', collection_method TEXT, evidence_sha256 TEXT,
+  source TEXT NOT NULL DEFAULT 'live', platform TEXT NOT NULL DEFAULT 'tiktok', collection_method TEXT, evidence_sha256 TEXT,
   hashtags TEXT, comment_status TEXT, discovery_keyword TEXT,
   UNIQUE(video_id, brand_id)
 );
@@ -24,7 +25,7 @@ CREATE TABLE IF NOT EXISTS comments (
   id TEXT NOT NULL,
   post_id BIGINT NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
   text TEXT NOT NULL, author TEXT NOT NULL DEFAULT '', author_nickname TEXT,
-  parent_id TEXT, like_count BIGINT, sentiment TEXT, score DOUBLE PRECISION,
+  parent_id TEXT, like_count BIGINT, sentiment TEXT, score DOUBLE PRECISION, topic TEXT NOT NULL DEFAULT 'other', toxicity_score DOUBLE PRECISION NOT NULL DEFAULT 0, confidence DOUBLE PRECISION NOT NULL DEFAULT 0, analysis_evidence TEXT,
   created_at TIMESTAMPTZ NOT NULL, published_at TIMESTAMPTZ,
   PRIMARY KEY(id, post_id)
 );

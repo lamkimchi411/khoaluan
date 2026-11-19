@@ -1,11 +1,13 @@
 import express from 'express';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { crisis, validatePost, viralSpike, riskScore, severityForRisk } from './logic.js';
 import { createCrawlerJobs } from './crawler-jobs.js';
 import { createMysqlDatabase } from './mysql.js';
 import { createSqliteDatabase } from './sqlite.js';
 import { createPostgresDatabase } from './postgres.js';
 import { createCrawlData } from './crawl-data.js';
+import { createFacebookCollector, validateFacebookPageId } from './facebook-collector.js';
 import { loadEnvFile } from 'node:process';
 import { fileURLToPath } from 'node:url';
 // Explicit process settings (test, Docker, deployment) must take precedence
@@ -17,6 +19,13 @@ Object.assign(process.env, explicitEnvironment);
 const driver = process.env.DB_DRIVER || 'mysql';
 if (!['mysql', 'sqlite', 'postgres'].includes(driver)) throw Error('DB_DRIVER phải là mysql, postgres hoặc sqlite');
 const db = driver === 'postgres' ? await createPostgresDatabase({ schema: process.env.PG_SCHEMA || 'public' }) : driver === 'mysql' ? await createMysqlDatabase() : createSqliteDatabase();
+for (const sql of [
+  "ALTER TABLE brands ADD COLUMN facebook_page_id TEXT", "ALTER TABLE posts ADD COLUMN platform TEXT NOT NULL DEFAULT 'tiktok'",
+  "ALTER TABLE comments ADD COLUMN topic VARCHAR(50) NOT NULL DEFAULT 'other'", "ALTER TABLE comments ADD COLUMN toxicity_score DOUBLE PRECISION NOT NULL DEFAULT 0",
+  "ALTER TABLE comments ADD COLUMN analysis_evidence TEXT", "ALTER TABLE comments ADD COLUMN confidence DOUBLE PRECISION NOT NULL DEFAULT 0"
+]) {
+  try { await db.exec(sql); } catch (error) { if (!/duplicate column|already exists/i.test(error.message)) throw error; }
+}
 if (!(await db.prepare('SELECT id FROM brands LIMIT 1').get())) {
   for (const [name, keywords] of [['VinFast', 'VinFast, VF 3, VF 8'], ['Shopee', 'Shopee, ShopeeFood'], ['Fahasa', 'Fahasa, Nhà sách Fahasa']]) await db.prepare('INSERT INTO brands(name,keywords) VALUES(?,?)').run(name, keywords);
 }
@@ -25,6 +34,7 @@ if (!(await db.prepare('SELECT id FROM staff LIMIT 1').get())) {
     await db.prepare('INSERT INTO staff(name,role) VALUES(?,?)').run(name, role);
 }
 const app = express();
+const execFileAsync = promisify(execFile);
 app.use(express.json({
   limit: '2mb'
 }));
@@ -32,21 +42,17 @@ const all = async (sql, ...args) => await db.prepare(sql).all(...args);
 const brand = async id => await db.prepare("SELECT * FROM brands WHERE id=?").get(Number(id));
 const crawlData = await createCrawlData(db);
 const crawlerJobs = await createCrawlerJobs(db, { onJobCreated: crawlData.register, withDataLock: crawlData.exclusive });
+const facebookCollector = createFacebookCollector(db, { registerRun: crawlData.register });
 app.get('/api/brands/:id/jobs', async (req,res) => {
   const brandId = Number(req.params.id), before = Number(req.query.before || Number.MAX_SAFE_INTEGER);
   if (!Number.isSafeInteger(brandId) || !Number.isSafeInteger(before)) return res.status(400).json({error:'ID không hợp lệ'});
   const rows = await all('SELECT j.*,r.job_id AS tracked_job_id,r.deleted_at FROM jobs j LEFT JOIN crawl_data_runs r ON r.job_id=j.id WHERE j.brand_id=? AND j.id<? ORDER BY j.id DESC LIMIT 21',brandId,before);
   res.json({ jobs:rows.slice(0,20), has_more: rows.length>20 });
 });
-app.get('/api/jobs/:id/data', async (req,res) => {
-  const id=Number(req.params.id);
-  if (!Number.isSafeInteger(id) || id<=0) return res.status(400).json({error:'ID không hợp lệ'});
-  try { res.json(await crawlData.preview(id)); } catch(e) { res.status(e.status||500).json({error:e.message}); }
-});
-app.delete('/api/jobs/:id/data', async (req,res) => {
-  const id=Number(req.params.id);
-  if (!Number.isSafeInteger(id) || id<=0 || req.body?.confirm_job_id!==id) return res.status(400).json({error:'Vui lòng xác nhận đúng lượt quét cần xoá'});
-  try { res.json(await crawlData.remove(id)); } catch(e) { res.status(e.status||500).json({error:e.message}); }
+app.delete('/api/jobs/history', async (req,res) => {
+  const ids=req.body?.job_ids, confirmed=req.body?.confirm_job_ids;
+  if (!Array.isArray(ids) || !ids.length || ids.length>20 || !ids.every(id=>Number.isSafeInteger(id)&&id>0) || new Set(ids).size!==ids.length || JSON.stringify(ids) !== JSON.stringify(confirmed)) return res.status(400).json({error:'Vui lòng xác nhận đúng các lịch sử tác vụ cần xoá'});
+  try { res.json(await crawlData.removeHistories(ids)); } catch(e) { res.status(e.status||500).json({error:e.message}); }
 });
 app.get('/api/brands/:id/schedule', async (req, res) => {
   const b = await brand(req.params.id);
@@ -109,12 +115,26 @@ async function evaluate(id) {
   if (r.triggered) await raiseAlert(id, `${r.ratio.toFixed(1)}% bình luận tiêu cực trong 1 giờ (${r.negative}/${r.total})`);
 }
 const now = () => new Date().toISOString();
+const staffById = async value => {
+  const id = Number(value);
+  return Number.isSafeInteger(id) && id > 0 ? await db.prepare('SELECT * FROM staff WHERE id=? AND active=TRUE').get(id) : null;
+};
+async function actorFor(req) {
+  const actor = await staffById(req.get('x-actor-id') || req.body?.actor_id);
+  if (actor) return actor;
+  // Local compatibility mode keeps existing single-user installations usable.
+  if (process.env.NODE_ENV !== 'production') return await db.prepare("SELECT * FROM staff WHERE role='admin' AND active=TRUE ORDER BY id LIMIT 1").get();
+  const error = Error('Cần phiên nhân sự hợp lệ'); error.status = 401; throw error;
+}
+function requireRole(actor, roles) {
+  if (!actor || !roles.includes(actor.role)) { const error = Error('Vai trò hiện tại không có quyền thực hiện thao tác này'); error.status = 403; throw error; }
+}
 async function audit(ticketId, action, detail = '', actor = 'Hệ thống') {
   await db.prepare('INSERT INTO ticket_actions(ticket_id,actor,action,detail,created_at) VALUES(?,?,?,?,?)').run(ticketId, actor, action, detail, now());
 }
 async function leastBusyAssignee(queue) {
   return await db.prepare(`SELECT s.* FROM staff s
-    LEFT JOIN tickets t ON t.assignee_id=s.id AND t.status IN ('open','in_progress','monitoring')
+    LEFT JOIN tickets t ON t.assignee_id=s.id AND t.status IN ('open','in_progress','pending_approval','monitoring')
     WHERE s.role=? AND s.active=TRUE GROUP BY s.id ORDER BY COUNT(t.id),s.id LIMIT 1`).get(queue);
 }
 async function createTicket({ brandId, postId, commentId, score, commentText, reengaged = false }) {
@@ -170,7 +190,7 @@ async function aiDrafts(ticket) {
   }
 }
 async function escalateOverdueTickets() {
-  const rows = await all("SELECT t.*,b.name AS brand_name FROM tickets t JOIN brands b ON b.id=t.brand_id WHERE t.status IN ('open','in_progress','monitoring') AND t.escalated_at IS NULL AND t.due_at<?", now());
+  const rows = await all("SELECT t.*,b.name AS brand_name FROM tickets t JOIN brands b ON b.id=t.brand_id WHERE t.status IN ('open','in_progress','pending_approval','monitoring') AND t.escalated_at IS NULL AND t.due_at<?", now());
   for (const ticket of rows) {
     const nextRole = ticket.queue === 'cskh' ? 'pr' : 'admin';
     const manager = await leastBusyAssignee(nextRole);
@@ -209,23 +229,40 @@ app.post('/api/tickets/:id/ai-drafts', async (req, res) => {
   await audit(ticket.id, 'ai_drafts_generated', `Đã tạo 3 phương án phản hồi (${result.provider}); cần nhân sự duyệt trước khi gửi`);
   res.json({ ...result, disclaimer: 'Bản nháp do trợ lý tạo; cần được nhân sự kiểm tra và duyệt trước khi phản hồi.' });
 });
+app.get('/api/staff', async (req, res) => res.json(await all('SELECT id,name,role,active FROM staff WHERE active=TRUE ORDER BY role,name')));
 app.post('/api/tickets/:id/responses', async (req, res) => {
   const ticket = await db.prepare('SELECT * FROM tickets WHERE id=?').get(Number(req.params.id));
-  const { content, actor = 'Nhân viên' } = req.body;
+  const { content } = req.body;
   if (!ticket) return res.sendStatus(404);
-  if (typeof content !== 'string' || !content.trim() || content.length > 5000 || typeof actor !== 'string' || actor.length > 100) return res.status(400).json({ error: 'Nội dung duyệt không hợp lệ' });
-  const result = await db.prepare('INSERT INTO ticket_responses(ticket_id,content,status,approved_by,approved_at) VALUES(?,?,?,?,?)').run(ticket.id, content.trim(), 'approved', actor, now());
-  await db.prepare("UPDATE tickets SET status='in_progress',accepted_at=? WHERE id=?").run(ticket.accepted_at || now(), ticket.id);
-  await audit(ticket.id, 'response_approved', 'Nhân viên đã duyệt nội dung phản hồi', actor);
-  res.status(201).json({ id: result.lastInsertRowid, status: 'approved' });
+  try {
+    const actor = await actorFor(req);
+    requireRole(actor, ['cskh', 'pr', 'admin']);
+    if (ticket.assignee_id && ticket.assignee_id !== actor.id && !['pr','admin'].includes(actor.role)) throw Object.assign(Error('Chỉ người được phân công mới có thể soạn phản hồi'), { status: 403 });
+    if (typeof content !== 'string' || !content.trim() || content.length > 5000) return res.status(400).json({ error: 'Nội dung phản hồi không hợp lệ' });
+    const result = await db.prepare('INSERT INTO ticket_responses(ticket_id,content,status,approved_by,approved_at) VALUES(?,?,?,?,?)').run(ticket.id, content.trim(), 'pending_approval', actor.name, now());
+    await db.prepare("UPDATE tickets SET status='pending_approval',accepted_at=? WHERE id=?").run(ticket.accepted_at || now(), ticket.id);
+    await audit(ticket.id, 'response_submitted', 'Đã gửi phản hồi chờ PR/Admin duyệt', actor.name);
+    res.status(201).json({ id: result.lastInsertRowid, status: 'pending_approval' });
+  } catch (e) { res.status(e.status || 403).json({ error: e.message }); }
+});
+app.patch('/api/tickets/:id/responses/:responseId/approve', async (req, res) => {
+  const response = await db.prepare('SELECT * FROM ticket_responses WHERE id=? AND ticket_id=?').get(Number(req.params.responseId), Number(req.params.id));
+  if (!response) return res.sendStatus(404);
+  try { const actor = await actorFor(req); requireRole(actor, ['pr', 'admin']);
+    if (response.status !== 'pending_approval') return res.status(409).json({ error: 'Phản hồi không ở trạng thái chờ duyệt' });
+    await db.prepare("UPDATE ticket_responses SET status='approved',approved_by=?,approved_at=? WHERE id=?").run(actor.name, now(), response.id);
+    await db.prepare("UPDATE tickets SET status='in_progress' WHERE id=?").run(Number(req.params.id));
+    await audit(Number(req.params.id), 'response_approved', 'PR/Admin đã duyệt nội dung phản hồi', actor.name); res.json({ ok: true });
+  } catch (e) { res.status(e.status || 403).json({ error: e.message }); }
 });
 app.post('/api/tickets/:id/responses/:responseId/publish', async (req, res) => {
   const ticket = await db.prepare('SELECT * FROM tickets WHERE id=?').get(Number(req.params.id));
   const response = await db.prepare('SELECT * FROM ticket_responses WHERE id=? AND ticket_id=?').get(Number(req.params.responseId), Number(req.params.id));
-  const { mode = 'manual', published_url = '', actor = 'Nhân viên' } = req.body;
+  const { mode = 'manual', published_url = '' } = req.body;
   if (!ticket || !response) return res.sendStatus(404);
   if (!['approved','published'].includes(response.status)) return res.status(409).json({ error: 'Phản hồi thuộc vòng xử lý cũ. Hãy duyệt phản hồi mới trước khi phát hành.' });
-  if (!['manual','api'].includes(mode) || typeof published_url !== 'string' || published_url.length > 1000 || typeof actor !== 'string' || actor.length > 100) return res.status(400).json({ error: 'Dữ liệu phát hành không hợp lệ' });
+  if (!['manual','api'].includes(mode) || typeof published_url !== 'string' || published_url.length > 1000) return res.status(400).json({ error: 'Dữ liệu phát hành không hợp lệ' });
+  let actor; try { actor = await actorFor(req); requireRole(actor, ['pr', 'admin']); } catch (e) { return res.status(e.status || 403).json({ error: e.message }); }
   if (mode === 'manual' && published_url && !/^https:\/\//.test(published_url)) return res.status(400).json({ error: 'Link minh chứng phải dùng HTTPS' });
   if (mode === 'api') {
     if (!process.env.PUBLISH_WEBHOOK_URL) return res.status(409).json({ error: 'Chưa cấu hình PUBLISH_WEBHOOK_URL cho chế độ API' });
@@ -233,19 +270,25 @@ app.post('/api/tickets/:id/responses/:responseId/publish', async (req, res) => {
     if (!outgoing.ok) return res.status(502).json({ error: 'Kênh phát hành không phản hồi thành công' });
   }
   await db.prepare('UPDATE ticket_responses SET status=?,published_at=?,publish_mode=?,published_url=? WHERE id=?').run('published', now(), mode, published_url || null, response.id);
-  await audit(ticket.id, 'response_published', mode === 'api' ? 'Đã gửi phản hồi qua API' : `Đã ghi nhận phát hành thủ công${published_url ? `: ${published_url}` : ''}`, actor);
+  await db.prepare("UPDATE tickets SET status='resolved',resolved_at=? WHERE id=?").run(now(), ticket.id);
+  await audit(ticket.id, 'response_published', mode === 'api' ? 'Đã gửi phản hồi qua API' : `Đã ghi nhận phát hành thủ công${published_url ? `: ${published_url}` : ''}`, actor.name);
   res.json({ ok: true });
 });
 app.patch('/api/tickets/:id', async (req, res) => {
   const ticket = await db.prepare('SELECT * FROM tickets WHERE id=?').get(Number(req.params.id));
   if (!ticket) return res.sendStatus(404);
-  const { status, note = '', actor = 'Nhân viên' } = req.body;
-  if (!['open','in_progress','monitoring','resolved','closed'].includes(status) || typeof note !== 'string' || note.length > 5000 || typeof actor !== 'string' || actor.length > 100) return res.status(400).json({ error: 'Dữ liệu cập nhật ticket không hợp lệ' });
+  const { status, note = '' } = req.body;
+  if (!['open','in_progress','monitoring','resolved','closed'].includes(status) || typeof note !== 'string' || note.length > 5000) return res.status(400).json({ error: 'Dữ liệu cập nhật ticket không hợp lệ' });
+  let actor; try { actor = await actorFor(req); } catch(e) { return res.status(e.status || 401).json({ error:e.message }); }
+  const transitions = { open: ['in_progress','monitoring'], in_progress: ['monitoring','pending_approval'], pending_approval: ['in_progress'], monitoring: ['in_progress'], resolved: ['closed'], closed: [] };
+  if (!(transitions[ticket.status] || []).includes(status)) return res.status(409).json({ error: `Không thể chuyển từ ${ticket.status} sang ${status}` });
+  if (status === 'closed') requireRole(actor, ticket.severity === 'critical' ? ['pr','admin'] : ['cskh','pr','admin']);
+  else if (ticket.assignee_id && ticket.assignee_id !== actor.id && !['pr','admin'].includes(actor.role)) return res.status(403).json({ error:'Chỉ người được phân công hoặc quản lý được cập nhật ticket' });
   if (status === 'closed' && !(await db.prepare("SELECT id FROM ticket_responses WHERE ticket_id=? AND status='published'").get(ticket.id))) return res.status(409).json({ error: 'Cần phát hành phản hồi trước khi đóng ticket' });
   const acceptedAt = ticket.accepted_at || now();
   const resolvedAt = ['resolved','closed'].includes(status) ? now() : null;
   await db.prepare('UPDATE tickets SET status=?,accepted_at=?,resolved_at=?,resolution_note=? WHERE id=?').run(status, acceptedAt, resolvedAt, note, ticket.id);
-  await audit(ticket.id, ['resolved','closed'].includes(status) ? status : status === 'monitoring' ? 'monitoring' : 'accepted', note || `Chuyển trạng thái ${status}`, actor);
+  await audit(ticket.id, ['resolved','closed'].includes(status) ? status : status === 'monitoring' ? 'monitoring' : 'accepted', note || `Chuyển trạng thái ${status}`, actor.name);
   res.json({ ok: true });
 });
 app.get('/api/analytics/sla', async (req, res) => {
@@ -253,11 +296,22 @@ app.get('/api/analytics/sla', async (req, res) => {
   const tickets = await all('SELECT * FROM tickets WHERE brand_id=?', brandId);
   const resolved = tickets.filter(t => t.resolved_at);
   const onTime = resolved.filter(t => Date.parse(t.resolved_at) <= Date.parse(t.due_at)).length;
-  const staff = await all(`SELECT s.id,s.name,s.role,COUNT(t.id) AS handled,SUM(CASE WHEN t.resolved_at IS NOT NULL AND t.resolved_at<=t.due_at THEN 1 ELSE 0 END) AS on_time FROM staff s LEFT JOIN tickets t ON t.assignee_id=s.id AND t.brand_id=? GROUP BY s.id ORDER BY handled DESC`, brandId);
+  const averageResolutionMinutes = resolved.length ? Math.round(resolved.reduce((sum, ticket) => sum + (Date.parse(ticket.resolved_at) - Date.parse(ticket.created_at)) / 60000, 0) / resolved.length * 10) / 10 : null;
+  const open = tickets.filter(ticket => !ticket.resolved_at).length;
+  const overdue = tickets.filter(ticket => !ticket.resolved_at && Date.parse(ticket.due_at) < Date.now()).length;
+  const escalated = tickets.filter(ticket => ticket.escalated_at).length;
+  const staffRows = await all(`SELECT s.id,s.name,s.role,COUNT(t.id) AS handled,SUM(CASE WHEN t.resolved_at IS NOT NULL AND t.resolved_at<=t.due_at THEN 1 ELSE 0 END) AS on_time FROM staff s LEFT JOIN tickets t ON t.assignee_id=s.id AND t.brand_id=? GROUP BY s.id ORDER BY handled DESC`, brandId);
+  const staff = staffRows.map(row => ({ ...row, handled: Number.isFinite(Number(row.handled)) ? Number(row.handled) : 0, on_time: Number.isFinite(Number(row.on_time)) ? Number(row.on_time) : 0 }));
   const heatmapMap = new Map();
   for (const ticket of tickets) { const d = new Date(ticket.created_at), key = `${d.getDay()}-${d.getHours()}`; heatmapMap.set(key, (heatmapMap.get(key) || 0) + 1); }
   const heatmap = [...heatmapMap].map(([key, total]) => { const [weekday, hour] = key.split('-').map(Number); return { weekday, hour, total }; });
-  res.json({ total: tickets.length, resolved: resolved.length, on_time_rate: resolved.length ? Math.round(onTime / resolved.length * 100) : 0, staff, heatmap });
+  res.json({ total: tickets.length, resolved: resolved.length, open, overdue, escalated, average_resolution_minutes: averageResolutionMinutes, on_time_rate: resolved.length ? Math.round(onTime / resolved.length * 100) : 0, staff, heatmap });
+});
+app.get('/api/analytics/nlp', async (req, res) => {
+  try {
+    const { stdout } = await execFileAsync(process.env.PYTHON_BIN || 'python', ['python/evaluate_nlp.py'], { cwd: process.cwd(), timeout: 10000, maxBuffer: 200000 });
+    res.json(JSON.parse(stdout));
+  } catch (error) { res.status(500).json({ error: 'Không thể chạy đánh giá NLP: ' + error.message }); }
 });
 app.patch("/api/brands/:id/channels", async (req, res) => {
   const {
@@ -303,13 +357,14 @@ app.post("/api/brands", async (req, res) => {
 app.patch("/api/brands/:id", async (req, res) => {
   const {
     threshold,
-    keywords
+    keywords,
+    facebook_page_id = ''
   } = req.body;
   if (!(await brand(req.params.id))) return res.sendStatus(404);
-  if (!Number.isFinite(threshold) || threshold < 1 || threshold > 100 || typeof keywords !== "string" || !keywords.trim() || keywords.length > 500) return res.status(400).json({
+  if (!Number.isFinite(threshold) || threshold < 1 || threshold > 100 || typeof keywords !== "string" || !keywords.trim() || keywords.length > 500 || !validateFacebookPageId(facebook_page_id)) return res.status(400).json({
     error: "Cấu hình không hợp lệ"
   });
-  await db.prepare("UPDATE brands SET threshold=?,keywords=? WHERE id=?").run(threshold, keywords, Number(req.params.id));
+  await db.prepare("UPDATE brands SET threshold=?,keywords=?,facebook_page_id=? WHERE id=?").run(threshold, keywords, facebook_page_id, Number(req.params.id));
   res.json({
     ok: true
   });
@@ -354,7 +409,7 @@ app.post("/api/ingest", async (req, res) => {
       const results = await analyze([p.caption, ...comments.map(c => c.text)]);
       let savedPostId;
       await db.transaction(async () => {
-        const r = await db.prepare("INSERT INTO posts(video_id,brand_id,caption,author,views,likes,comment_count,video_url,sentiment,score,created_at,source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(video_id,brand_id) DO UPDATE SET views=COALESCE(excluded.views,posts.views),likes=COALESCE(excluded.likes,posts.likes),comment_count=COALESCE(excluded.comment_count,posts.comment_count),caption=excluded.caption,sentiment=excluded.sentiment,score=excluded.score RETURNING id").get(p.video_id, brand_id, p.caption, p.author || "", p.views ?? null, p.likes ?? null, p.comment_count ?? null, p.video_url, results[0].sentiment, results[0].score, new Date().toISOString(), "live");
+        const r = await db.prepare("INSERT INTO posts(video_id,brand_id,caption,author,views,likes,comment_count,video_url,sentiment,score,created_at,source,platform) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(video_id,brand_id) DO UPDATE SET views=COALESCE(excluded.views,posts.views),likes=COALESCE(excluded.likes,posts.likes),comment_count=COALESCE(excluded.comment_count,posts.comment_count),caption=excluded.caption,sentiment=excluded.sentiment,score=excluded.score,platform=excluded.platform RETURNING id").get(p.video_id, brand_id, p.caption, p.author || "", p.views ?? null, p.likes ?? null, p.comment_count ?? null, p.video_url, results[0].sentiment, results[0].score, new Date().toISOString(), "live", p.platform || 'tiktok');
         savedPostId = r.id;
         await crawlData.recordPost(jobId,r.id,Boolean(previous));
         const oldComments = await db.prepare('SELECT id,like_count FROM comments WHERE post_id=?').all(r.id);
@@ -363,7 +418,7 @@ app.post("/api/ingest", async (req, res) => {
         for (let i = 0; i < comments.length; i++) {
           const c = comments[i],
             a = results[i + 1];
-          await db.prepare("INSERT INTO comments(id,post_id,text,author,sentiment,score,created_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT(id,post_id) DO UPDATE SET text=excluded.text,sentiment=excluded.sentiment,score=excluded.score").run(String(c.id), r.id, c.text, c.author || "", a.sentiment, a.score, new Date().toISOString());
+          await db.prepare("INSERT INTO comments(id,post_id,text,author,sentiment,score,topic,toxicity_score,confidence,analysis_evidence,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id,post_id) DO UPDATE SET text=excluded.text,sentiment=excluded.sentiment,score=excluded.score,topic=excluded.topic,toxicity_score=excluded.toxicity_score,confidence=excluded.confidence,analysis_evidence=excluded.analysis_evidence").run(String(c.id), r.id, c.text, c.author || "", a.sentiment, a.score, a.topic || 'other', a.toxicity_score || 0, a.confidence || 0, JSON.stringify(a.evidence || {}), new Date().toISOString());
           await db.prepare('UPDATE comments SET author_nickname=?,parent_id=?,like_count=?,published_at=? WHERE id=? AND post_id=?').run(c.author_nickname || null, c.parent_id || null, c.like_count ?? null, c.published_at || null, String(c.id), r.id);
           await crawlData.recordComment(jobId,r.id,String(c.id),existingComments.has(String(c.id)));
           existingComments.add(String(c.id));
@@ -373,9 +428,12 @@ app.post("/api/ingest", async (req, res) => {
         await db.prepare('UPDATE posts SET author_nickname=?,hashtags=?,shares=COALESCE(?,shares),saves=COALESCE(?,saves),comment_status=?,discovery_keyword=? WHERE id=?').run(p.author_nickname || null, JSON.stringify(p.hashtags || []), p.shares ?? null, p.saves ?? null, p.comment_status || null, p.discovery_keyword || null, r.id);
       });
       for (let i = 0; i < comments.length; i++) {
-        const score = riskScore({ sentiment: results[i + 1].sentiment, score: results[i + 1].score, like_count: comments[i].like_count });
+        const analysis = results[i + 1];
         const before = p._previousCommentLikes?.[String(comments[i].id)] || 0;
         const after = Number(comments[i].like_count) || 0;
+        const elapsed = previous?.observed_at ? Date.now() - Date.parse(previous.observed_at) : Infinity;
+        const velocity_score = elapsed > 0 && elapsed <= 3600000 ? Math.min(1, Math.max(0, after - before) / 50) : 0;
+        const score = riskScore({ sentiment: analysis.sentiment, score: analysis.score, like_count: after, toxicity_score: analysis.toxicity_score, velocity_score, topic: analysis.topic });
         const reengaged = after >= Math.max(50, before * 2) && after - before >= 20;
         await createTicket({ brandId: brand_id, postId: savedPostId, commentId: comments[i].id, score, commentText: comments[i].text, reengaged });
       }
@@ -414,6 +472,12 @@ app.post("/api/crawl", async (req, res) => {
       error: e.message
     });
   }
+});
+app.post('/api/facebook/crawl', async (req, res) => {
+  const b = await brand(req.body.brand_id);
+  if (!b) return res.status(400).json({ error: 'Thương hiệu không hợp lệ' });
+  try { res.status(202).json(await facebookCollector.collect(b)); }
+  catch (error) { res.status(409).json({ error: error.message }); }
 });
 await db.prepare("UPDATE jobs SET status='failed',message='Tiến trình bị gián đoạn; vui lòng chạy lại' WHERE status='running'").run();
 app.post("/api/demo", async (req, res) => {

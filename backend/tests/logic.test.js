@@ -62,5 +62,12 @@ test("risk creates only medium and critical ticket severities", () => {
   assert.equal(severityForRisk(29).level, 'low');
   assert.deepEqual(severityForRisk(30), { level: 'medium', queue: 'cskh', sla_minutes: 60 });
   assert.deepEqual(severityForRisk(70), { level: 'critical', queue: 'pr', sla_minutes: 15 });
-  assert.equal(riskScore({ sentiment: 'negative', score: 1, like_count: 100 }), 100);
+  assert.equal(riskScore({ sentiment: 'negative', score: 1, like_count: 100 }), 40);
+  assert.equal(riskScore({ sentiment: 'negative', score: 1, like_count: 100, toxicity_score: 1, velocity_score: 1, topic: 'scam' }), 100);
+});
+test("risk score exposes higher priority for toxicity, velocity, and scam reports", () => {
+  const ordinary = riskScore({ sentiment: 'negative', score: .6, like_count: 10 });
+  const urgent = riskScore({ sentiment: 'negative', score: .6, like_count: 10, toxicity_score: 1, velocity_score: 1, topic: 'scam' });
+  assert.ok(urgent > ordinary);
+  assert.equal(riskScore({ sentiment: 'neutral', score: 1, toxicity_score: 1, velocity_score: 1, topic: 'scam' }), 0);
 });

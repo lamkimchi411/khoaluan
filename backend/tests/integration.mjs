@@ -45,12 +45,13 @@ const server = spawn(process.execPath, ["server/index.js"], {
   stdio: "ignore",
 });
 const base = "http://127.0.0.1:13001/api";
-async function request(path, body, method = "POST", token = true) {
+async function request(path, body, method = "POST", token = true, actorId = null) {
   const r = await fetch(base + path, {
     method: body === undefined ? "GET" : method,
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: "Bearer integration-only" } : {}),
+      ...(actorId ? { "X-Actor-ID": String(actorId) } : {}),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -163,6 +164,11 @@ try {
   const demo = (await request("/dashboard?brand=1&days=30&source=demo")).data;
   assert.equal(demo.posts.length, 42);
   assert.equal(demo.alerts.length, 0);
+  const nlpEvaluation = (await request('/analytics/nlp')).data;
+  assert.equal(nlpEvaluation.dataset_size, 34);
+  assert.ok(nlpEvaluation.tasks.topic.macro_f1 >= 0 && nlpEvaluation.tasks.topic.macro_f1 <= 1);
+  assert.ok(nlpEvaluation.tasks.toxicity.macro_f1 >= 0 && nlpEvaluation.tasks.toxicity.macro_f1 <= 1);
+  assert.ok(nlpEvaluation.accuracy >= 0 && nlpEvaluation.accuracy <= 1);
   process.env.DB_PATH=join(dir,'test.db');
   process.env.MYSQL_DATABASE=testDatabase;
   const testDb=usePostgres ? await createPostgresDatabase({schema:testDatabase}) : useMysql ? await createMysqlDatabase() : createSqliteDatabase();
@@ -175,14 +181,19 @@ try {
       const t = tickets[0];
       const path = `/tickets/${t.id}`;
       check('Cannot close before publication', (await request(path, {status:'closed'}, 'PATCH')).status === 409);
-      const approved = await request(path+'/responses', {content:'BẢN THỬ NGHIỆM: Xin lỗi bạn, đội ngũ sẽ kiểm tra phản ánh.',actor:'Test CSKH'});
-      check('Human approval persists response', approved.status === 201);
+      const staff = (await request('/staff', undefined, 'GET')).data;
+      const cskh = staff.find(s => s.role === 'cskh'), pr = staff.find(s => s.role === 'pr');
+      const pending = await request(path+'/responses', {content:'BẢN THỬ NGHIỆM: Xin lỗi bạn, đội ngũ sẽ kiểm tra phản ánh.'}, 'POST', true, cskh.id);
+      check('CSKH submits response for approval', pending.status === 201 && pending.data.status === 'pending_approval');
+      check('CSKH cannot self-approve', (await request(`${path}/responses/${pending.data.id}/approve`, {}, 'PATCH', true, cskh.id)).status === 403);
+      const approved = await request(`${path}/responses/${pending.data.id}/approve`, {}, 'PATCH', true, pr.id);
+      check('PR approval persists response', approved.status === 200);
       await testDb.prepare('UPDATE tickets SET due_at=? WHERE id=?').run('2020-01-01T00:00:00.000Z',t.id);
       await request(`/tickets?brand=${b.id}`);
       const overdue = (await request(path)).data;
       check('Approved in_progress ticket escalates on SLA breach', Boolean(overdue.escalated_at) && overdue.queue !== t.queue);
       check('Cannot close after approval alone', (await request(path, {status:'closed'}, 'PATCH')).status === 409);
-      check('Manual publication records success', (await request(`${path}/responses/${approved.data.id}/publish`, {mode:'manual',published_url:'https://example.com/test-evidence',actor:'Test CSKH'})).status === 200);
+      check('Manual publication records success', (await request(`${path}/responses/${pending.data.id}/publish`, {mode:'manual',published_url:'https://example.com/test-evidence'}, 'POST', true, pr.id)).status === 200);
       check('Can close after publication', (await request(path,{status:'closed'},'PATCH')).status === 200);
       const surge = structuredClone(post);
       surge.comments.find(c => c.id === String(t.comment_id)).like_count = 200;
@@ -190,11 +201,12 @@ try {
       const reopened = (await request(path)).data;
       check('Engagement surge reopens same ticket and records audit', reopened.status === 'open' && reopened.actions.some(a=>a.action==='reopened'));
       check('Reopened cycle cannot close using previous publication', (await request(path,{status:'closed'},'PATCH')).status === 409);
-      check('Cannot republish previous cycle response', (await request(`${path}/responses/${approved.data.id}/publish`, {mode:'manual'})).status === 409);
-      check('Previous publication evidence retained', reopened.responses.some(r => r.id == approved.data.id && r.status === 'archived_published' && r.published_at));
-      const next = await request(path+'/responses', {content:'Phản hồi mới cho vòng tái bùng phát',actor:'Test PR'});
-      check('New approval alone still cannot close', next.status === 201 && (await request(path,{status:'closed'},'PATCH')).status === 409);
-      check('New cycle publication allows closure', (await request(`${path}/responses/${next.data.id}/publish`,{mode:'manual'})).status === 200 && (await request(path,{status:'closed'},'PATCH')).status === 200);
+      check('Cannot republish previous cycle response', (await request(`${path}/responses/${pending.data.id}/publish`, {mode:'manual'})).status === 409);
+      check('Previous publication evidence retained', reopened.responses.some(r => r.id == pending.data.id && r.status === 'archived_published' && r.published_at));
+      const next = await request(path+'/responses', {content:'Phản hồi mới cho vòng tái bùng phát'}, 'POST', true, pr.id);
+      const nextApproval = await request(`${path}/responses/${next.data.id}/approve`, {}, 'PATCH', true, pr.id);
+      check('New approval alone still cannot close', next.status === 201 && nextApproval.status === 200 && (await request(path,{status:'closed'},'PATCH')).status === 409);
+      check('New cycle publication allows closure', (await request(`${path}/responses/${next.data.id}/publish`,{mode:'manual'},'POST',true,pr.id)).status === 200 && (await request(path,{status:'closed'},'PATCH',true,pr.id)).status === 200);
       console.log(`WORKFLOW RESULT: ${findings.length} failed checks: ${findings.join('; ')}`);
       if (findings.length) process.exitCode = 1;
     }

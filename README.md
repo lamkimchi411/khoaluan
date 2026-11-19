@@ -105,6 +105,7 @@ TikTok public web → Python Playwright → POST /api/ingest
 | GET / DELETE | `/api/jobs/:id/data` | Xem trước / xoá dữ liệu của một lượt (`confirm_job_id` bắt buộc khi DELETE) |
 | GET/PUT | `/api/brands/:id/schedule` | Lịch quét và giới hạn |
 | POST | `/api/crawl` | `{ "brand_id": 1 }` |
+| POST | `/api/facebook/crawl` | Đọc Facebook Page đã cấu hình qua Meta Graph API |
 | POST | `/api/demo` | Nạp demo một lần cho thương hiệu |
 | POST | `/api/ingest` | Nhận tối đa 30 bài + bình luận |
 | PATCH | `/api/alerts/:id` | Đánh dấu đã xử lý |
@@ -136,7 +137,15 @@ Nếu thiếu khóa hoặc dịch vụ AI lỗi, API trả bộ bản nháp cụ
 
 ### Phạm vi nguồn dữ liệu
 
-Crawler đã triển khai là TikTok Web công khai. Facebook/Meta **chưa được kết nối**: để làm đúng chính sách cần quyền, access token và nguồn API/đối tượng dữ liệu do doanh nghiệp cấp; không dùng scraping để vượt đăng nhập hay quyền riêng tư. API ingest và risk/ticket engine dùng chung, nên có thể kết nối một Meta adapter được cấp quyền mà không thay đổi quy trình xử lý.
+TikTok dùng crawler web công khai. Facebook dùng **Meta Graph API**, chỉ đọc Facebook Page được doanh nghiệp cấp quyền; không scraping profile cá nhân, nhóm kín hoặc nội dung cần đăng nhập. Trong phần Thương hiệu, nhập Facebook Page ID rồi cấu hình biến môi trường ở backend:
+
+```text
+FACEBOOK_PAGE_ACCESS_TOKEN=...
+FACEBOOK_GRAPH_VERSION=v24.0
+FACEBOOK_MAX_POSTS=30
+```
+
+Page access token phải có quyền Meta phù hợp với Page đó. Nút **Thu thập Facebook** gửi dữ liệu vào cùng pipeline NLP, cảnh báo và ticket; token chỉ nằm ở server, không lưu ở frontend hoặc database.
 
 Ví dụ payload ingest (URL và ID cần thay bằng bài thực):
 

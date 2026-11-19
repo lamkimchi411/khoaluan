@@ -30,10 +30,16 @@ for (const [table, column, definition] of [
   ["comments", "parent_id", "TEXT"],
   ["comments", "like_count", "INTEGER"],
   ["comments", "published_at", "TEXT"],
+  ["comments", "topic", "TEXT DEFAULT 'other'"],
+  ["comments", "toxicity_score", "REAL DEFAULT 0"],
+  ["comments", "analysis_evidence", "TEXT"],
+  ["comments", "confidence", "REAL DEFAULT 0"],
   ["jobs", "report", "TEXT"],
   ["jobs", "finished_at", "TEXT"],
   ["brands", "email", "TEXT DEFAULT ''"],
   ["brands", "telegram", "TEXT DEFAULT ''"],
+  ["brands", "facebook_page_id", "TEXT"],
+  ["posts", "platform", "TEXT NOT NULL DEFAULT 'tiktok'"],
   ["alerts", "delivery", "TEXT DEFAULT 'Chỉ thông báo trong ứng dụng'"],
 ]) {
   if (

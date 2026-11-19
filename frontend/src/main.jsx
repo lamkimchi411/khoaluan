@@ -8,7 +8,6 @@ import {
   Bell,
   ChartNoAxesCombined,
   Check,
-  ChevronDown,
   Download,
   ExternalLink,
   Filter,
@@ -63,10 +62,15 @@ function BrandLogo({ compact = false }) {
   );
 }
 const fmt = (n) =>
-  n == null ? '—' : new Intl.NumberFormat("vi-VN", {
+  !Number.isFinite(Number(n)) ? '—' : new Intl.NumberFormat("vi-VN", {
     notation: n >= 10000 ? "compact" : "standard",
     maximumFractionDigits: 1,
   }).format(n);
+const pct = (value, fallback = '0%') => Number.isFinite(Number(value)) ? `${Math.round(Number(value) * 100)}%` : fallback;
+const ratioPct = (part, total) => {
+  const numerator = Number(part), denominator = Number(total);
+  return Number.isFinite(numerator) && Number.isFinite(denominator) && denominator > 0 ? `${Math.round(numerator / denominator * 100)}%` : '0%';
+};
 async function api(path, body, method = "POST") {
   const r = await fetch(
     "/api" + path,
@@ -74,7 +78,7 @@ async function api(path, body, method = "POST") {
       ? {}
       : {
           method,
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...(localStorage.getItem('brandpulse_actor_id') ? { 'X-Actor-ID': localStorage.getItem('brandpulse_actor_id') } : {}) },
           body: JSON.stringify(body),
         },
   );
@@ -93,22 +97,40 @@ function TicketDesk({ brandId, notify, refreshDashboard }) {
   useEffect(() => { setSelected(null); setDrafts([]); load(); }, [brandId]);
   const update = async (id, status, note = '') => { try { await api(`/tickets/${id}`, { status, note, actor: 'Administrator' }, 'PATCH'); await load(); await refreshDashboard(); notify(status === 'closed' ? 'Đã đóng ticket và ghi nhận SLA.' : 'Đã cập nhật ticket.'); } catch (e) { notify(e.message); } };
   const getDrafts = async (ticket) => { try { await api(`/tickets/${ticket.id}/view`, { actor: 'Administrator' }); const [result, detail] = await Promise.all([api(`/tickets/${ticket.id}/ai-drafts`, {}), api(`/tickets/${ticket.id}`)]); setSelected(detail); setDrafts(result.drafts); setEdited(result.drafts[0]); } catch (e) { notify(e.message); } };
-  const approve = async () => { try { await api(`/tickets/${selected.id}/responses`, { content: edited, actor: 'Administrator' }); const detail = await api(`/tickets/${selected.id}`); setSelected(detail); await load(); notify('Đã duyệt phản hồi. Bước tiếp theo: phát hành lên kênh mạng xã hội.'); } catch (e) { notify(e.message); } };
-  const publish = async (response) => { try { await api(`/tickets/${selected.id}/responses/${response.id}/publish`, { mode: 'manual', actor: 'Administrator' }); const detail = await api(`/tickets/${selected.id}`); setSelected(detail); await load(); notify('Đã ghi nhận phản hồi đã phát hành. Có thể đóng ticket khi hoàn tất.'); } catch (e) { notify(e.message); } };
+  const submitResponse = async () => { try { await api(`/tickets/${selected.id}/responses`, { content: edited }); const detail = await api(`/tickets/${selected.id}`); setSelected(detail); await load(); notify('Đã gửi phản hồi chờ PR hoặc Admin duyệt.'); } catch (e) { notify(e.message); } };
+  const approveResponse = async response => { try { await api(`/tickets/${selected.id}/responses/${response.id}/approve`, {}, 'PATCH'); const detail = await api(`/tickets/${selected.id}`); setSelected(detail); await load(); notify('Đã duyệt phản hồi. Bước tiếp theo: phát hành.'); } catch (e) { notify(e.message); } };
+  const publish = async (response) => { try { await api(`/tickets/${selected.id}/responses/${response.id}/publish`, { mode: 'manual' }); const detail = await api(`/tickets/${selected.id}`); setSelected(detail); await load(); notify('Đã ghi nhận phản hồi đã phát hành; ticket chuyển sang Đã xử lý.'); } catch (e) { notify(e.message); } };
   return <section className="card padded">
     <div className="card-heading"><div><h2>Trung tâm xử lý khủng hoảng</h2><p>Ticket chỉ được đóng sau khi phản hồi đã được duyệt và phát hành. Ticket quá SLA được đánh dấu đỏ.</p></div><span className="count-badge">{tickets.filter(t => t.status !== 'closed').length} mở</span></div>
     {loading ? <p className="muted">Đang tải ticket…</p> : !tickets.length ? <div className="empty"><ShieldCheck size={36}/><b>Chưa có ticket cần xử lý</b><p>Các tín hiệu rủi ro thấp chỉ được lưu để theo dõi.</p></div> : <div className="ticket-list">{tickets.map(t => <article className={`alert-row ${t.escalated_at ? 'ticket-overdue' : ''}`} key={t.id}>
       <div className="metric-icon orange"><Bell size={20}/></div><div className="ticket-body"><b>#{t.id} · {t.severity === 'critical' ? 'Khủng hoảng PR' : 'CSKH'} · {t.risk_score}/100</b><p>{t.comment_text || t.caption || 'Không còn nội dung nguồn'}</p><small>Phân công: {t.assignee_name || 'Chưa phân công'} · SLA: {new Date(t.due_at).toLocaleString('vi-VN')} {t.escalated_at ? ' · QUÁ HẠN' : ''}</small></div>
-      <div className="ticket-actions"><button className="button outline" onClick={() => getDrafts(t)}>Xử lý / Duyệt</button>{t.status === 'open' && <button className="button outline" onClick={() => update(t.id, 'monitoring')}>Đang theo dõi</button>}{t.status !== 'closed' && <button className="button primary" onClick={() => update(t.id, 'closed', 'Đã hoàn tất xử lý sau khi phát hành phản hồi')}>Đóng ticket</button>}</div>
+      <div className="ticket-actions"><button className="button outline" onClick={() => getDrafts(t)}>Soạn / Duyệt</button>{t.status === 'open' && <button className="button outline" onClick={() => update(t.id, 'monitoring')}>Đang theo dõi</button>}{t.status === 'resolved' && <button className="button primary" onClick={() => update(t.id, 'closed', 'Đã kiểm tra việc xử lý hoàn tất')}>Đóng ticket</button>}</div>
     </article>)}</div>}
-    {selected && <div className="ai-drafts"><div className="card-heading"><div><h3>Gợi ý phản hồi AI · Ticket #{selected.id}</h3><p>Luồng bắt buộc: chỉnh sửa → duyệt → phát hành → đóng ticket.</p></div><button className="icon-button" onClick={() => setSelected(null)}><X size={18}/></button></div>{drafts.map((draft, i) => <div className="ai-draft" key={i}><b>Phương án {String.fromCharCode(65+i)}</b><p>{draft}</p><button className="button outline" onClick={() => setEdited(draft)}>Chọn phương án</button></div>)}<label>Phản hồi cần duyệt<textarea value={edited} maxLength={5000} onChange={e => setEdited(e.target.value)} /></label><button className="button primary" disabled={!edited.trim()} onClick={approve}>Duyệt phản hồi</button>{selected.responses?.map(r => <div className="ai-draft" key={r.id}><b>Phản hồi #{r.id} · {r.status.startsWith('archived_') ? 'Lịch sử vòng trước' : r.status === 'published' ? 'Đã phát hành' : 'Đã duyệt'}</b><p>{r.content}</p>{r.status === 'approved' && <button className="button primary" onClick={() => publish(r)}>Ghi nhận phát hành thủ công</button>}</div>)}<details className="channel-help"><summary>Nhật ký ticket ({selected.actions?.length || 0})</summary>{selected.actions?.map(a => <p key={a.id}><b>{a.action}</b> · {a.actor} · {new Date(a.created_at).toLocaleString('vi-VN')}<br/>{a.detail}</p>)}</details></div>}
+    {selected && <div className="ai-drafts"><div className="card-heading"><div><h3>Gợi ý phản hồi AI · Ticket #{selected.id}</h3><p>Luồng bắt buộc: soạn → chờ PR/Admin duyệt → phát hành → đóng ticket.</p></div><button className="icon-button" onClick={() => setSelected(null)}><X size={18}/></button></div>{drafts.map((draft, i) => <div className="ai-draft" key={i}><b>Phương án {String.fromCharCode(65+i)}</b><p>{draft}</p><button className="button outline" onClick={() => setEdited(draft)}>Chọn phương án</button></div>)}<label>Phản hồi cần duyệt<textarea value={edited} maxLength={5000} onChange={e => setEdited(e.target.value)} /></label><button className="button primary" disabled={!edited.trim()} onClick={submitResponse}>Gửi chờ duyệt</button>{selected.responses?.map(r => <div className="ai-draft" key={r.id}><b>Phản hồi #{r.id} · {r.status.startsWith('archived_') ? 'Lịch sử vòng trước' : r.status === 'published' ? 'Đã phát hành' : r.status === 'pending_approval' ? 'Chờ duyệt' : 'Đã duyệt'}</b><p>{r.content}</p>{r.status === 'pending_approval' && <button className="button primary" onClick={() => approveResponse(r)}>PR/Admin duyệt</button>}{r.status === 'approved' && <button className="button primary" onClick={() => publish(r)}>Ghi nhận phát hành</button>}</div>)}<details className="channel-help"><summary>Nhật ký ticket ({selected.actions?.length || 0})</summary>{selected.actions?.map(a => <p key={a.id}><b>{a.action}</b> · {a.actor} · {new Date(a.created_at).toLocaleString('vi-VN')}<br/>{a.detail}</p>)}</details></div>}
   </section>;
 }
 function SLAReport({ brandId, notify }) {
   const [report, setReport] = useState(null);
   useEffect(() => { api(`/analytics/sla?brand=${brandId}`).then(setReport).catch(e => notify(e.message)); }, [brandId]);
   if (!report) return <p className="muted">Đang tải báo cáo SLA…</p>;
-  return <section className="card padded"><div className="card-heading"><div><h2>Hiệu suất SLA & nhân sự</h2><p>Tỷ lệ đúng hạn được tính từ thời điểm đóng ticket so với SLA cam kết.</p></div></div><div className="metrics-grid"><div className="metric-card"><small>TICKET TỔNG</small><b>{report.total}</b></div><div className="metric-card"><small>ĐÃ XỬ LÝ</small><b>{report.resolved}</b></div><div className="metric-card"><small>ĐÚNG HẠN</small><b>{report.on_time_rate}%</b></div></div><h3>Bảng xếp hạng xử lý</h3><div className="table-scroll"><table><thead><tr><th>NHÂN SỰ</th><th>VAI TRÒ</th><th>ĐÃ XỬ LÝ</th><th>ĐÚNG HẠN</th></tr></thead><tbody>{report.staff.map(s => <tr key={s.id}><td>{s.name}</td><td>{s.role}</td><td>{s.handled || 0}</td><td>{s.handled ? Math.round((s.on_time || 0) / s.handled * 100) : 0}%</td></tr>)}</tbody></table></div><h3>Bản đồ nhiệt rủi ro</h3><p className="muted">{report.heatmap.length ? report.heatmap.map(x => `Thứ ${x.weekday + 1}, ${String(x.hour).padStart(2,'0')}:00: ${x.total}`).join(' · ') : 'Chưa có dữ liệu ticket để xác định khung giờ rủi ro.'}</p></section>;
+  return <section className="card padded"><div className="card-heading"><div><h2>Hiệu suất SLA & nhân sự</h2><p>Đo lường từ lúc ticket được tạo đến khi hoàn tất xử lý.</p></div></div><div className="metrics-grid"><div className="metric-card"><small>TICKET TỔNG</small><b>{fmt(report.total)}</b></div><div className="metric-card"><small>ĐÃ XỬ LÝ</small><b>{fmt(report.resolved)}</b></div><div className="metric-card"><small>ĐANG MỞ</small><b>{fmt(report.open)}</b></div><div className="metric-card"><small>ĐÚNG HẠN</small><b>{Number.isFinite(Number(report.on_time_rate)) ? `${Math.round(Number(report.on_time_rate))}%` : '0%'}</b></div><div className="metric-card"><small>TB XỬ LÝ</small><b>{Number.isFinite(Number(report.average_resolution_minutes)) ? `${report.average_resolution_minutes}p` : '—'}</b></div><div className="metric-card"><small>QUÁ SLA / LEO THANG</small><b>{fmt(report.overdue)} / {fmt(report.escalated)}</b></div></div><h3>Bảng xếp hạng xử lý</h3><div className="table-scroll"><table><thead><tr><th>NHÂN SỰ</th><th>VAI TRÒ</th><th>ĐÃ XỬ LÝ</th><th>ĐÚNG HẠN</th></tr></thead><tbody>{report.staff.map(s => <tr key={s.id}><td>{s.name}</td><td>{s.role}</td><td>{fmt(s.handled) === '—' ? 0 : fmt(s.handled)}</td><td>{ratioPct(s.on_time, s.handled)}</td></tr>)}</tbody></table></div><h3>Bản đồ nhiệt rủi ro</h3><p className="muted">{report.heatmap.length ? report.heatmap.map(x => `Thứ ${x.weekday + 1}, ${String(x.hour).padStart(2,'0')}:00: ${x.total}`).join(' · ') : 'Chưa có dữ liệu ticket để xác định khung giờ rủi ro.'}</p></section>;
+}
+function NLPEvaluation({ notify }) {
+  const [report, setReport] = useState(null);
+  useEffect(() => { api('/analytics/nlp').then(setReport).catch(e => notify(e.message)); }, []);
+  if (!report) return <p className="muted">Đang đánh giá NLP…</p>;
+  const name = { positive: 'Tích cực', neutral: 'Trung tính', negative: 'Tiêu cực' };
+  const taskName = { sentiment: 'Cảm xúc', topic: 'Chủ đề', toxicity: 'Độc hại' };
+  return <section className="card padded"><div className="card-heading"><div><h2>Đánh giá NLP đa chiều</h2><p>Benchmark nội bộ có nhãn; confidence là độ tin cậy heuristic, không phải xác suất mô hình.</p></div><span className="subtle-tag">{report.dataset_size} mẫu</span></div><div className="metrics-grid">{Object.entries(report.tasks || {sentiment:report}).map(([key, task]) => <div className="metric-card" key={key}><small>{taskName[key]}</small><b>{pct(task.macro_f1)}</b><span>Macro F1 · {task.dataset_size} mẫu</span></div>)}</div><div className="table-scroll"><table><thead><tr><th>NHÃN CẢM XÚC</th><th>PRECISION</th><th>RECALL</th><th>F1</th><th>SỐ MẪU</th></tr></thead><tbody>{report.labels.map(label => <tr key={label}><td>{name[label]}</td><td>{pct(report.per_label[label].precision)}</td><td>{pct(report.per_label[label].recall)}</td><td>{pct(report.per_label[label].f1)}</td><td>{fmt(report.per_label[label].support)}</td></tr>)}</tbody></table></div><details className="channel-help"><summary>Confusion matrix cảm xúc</summary><div className="table-scroll"><table><thead><tr><th>Thực tế \ Dự đoán</th>{report.labels.map(label => <th key={label}>{name[label]}</th>)}</tr></thead><tbody>{report.labels.map(actual => <tr key={actual}><td>{name[actual]}</td>{report.labels.map(predicted => <td key={predicted}>{report.confusion_matrix[actual][predicted]}</td>)}</tr>)}</tbody></table></div></details></section>;
+}
+function TopicTrend({ comments }) {
+  const topics = useMemo(() => {
+    const midpoint = Date.now() - 24 * 3600000, grouped = new Map();
+    for (const comment of comments) { const key = comment.topic || 'other', value = grouped.get(key) || { topic:key, recent:0, previous:0 }; new Date(comment.created_at).getTime() >= midpoint ? value.recent++ : value.previous++; grouped.set(key, value); }
+    return [...grouped.values()].map(x => ({ ...x, growth: x.recent - x.previous })).sort((a,b) => b.growth - a.growth || b.recent - a.recent).slice(0, 6);
+  }, [comments]);
+  const label = { quality:'Chất lượng', service:'Dịch vụ', price:'Giá', scam:'Lừa đảo', delivery:'Giao hàng', other:'Khác' }, max = Math.max(1, ...topics.map(x => x.recent));
+  return <section className="card padded"><div className="card-heading"><div><h2>Vấn đề đang tăng</h2><p>So sánh 24 giờ gần nhất với giai đoạn trước đó trong dữ liệu đã thu thập.</p></div><span className="subtle-tag">Theo chủ đề</span></div>{topics.length ? <div className="topic-trend-list">{topics.map(x => <div key={x.topic}><div><b>{label[x.topic] || x.topic}</b><small>{x.recent} phản ánh gần đây · {x.growth >= 0 ? '+' : ''}{x.growth} so với kỳ trước</small></div><i><span style={{width:`${Math.max(8,x.recent / max * 100)}%`}} /></i></div>)}</div> : <p className="muted">Chưa có bình luận có thể phân loại chủ đề trong khoảng thời gian này.</p>}</section>;
 }
 function App() {
   const refreshId=useRef(0);
@@ -130,7 +152,12 @@ function App() {
     [modal, setModal] = useState(null),
     [toast, setToast] = useState(""),
     [busy, setBusy] = useState(false),
-    [loaded, setLoaded] = useState(false);
+    [loaded, setLoaded] = useState(false),
+    [staff, setStaff] = useState([]),
+    [actorId, setActorId] = useState(() => localStorage.getItem('brandpulse_actor_id') || '4');
+  const actor = staff.find(s => String(s.id) === String(actorId));
+  useEffect(() => { api('/staff').then(setStaff).catch(() => {}); }, []);
+  useEffect(() => { localStorage.setItem('brandpulse_actor_id', actorId); }, [actorId]);
   const current = brands.find((x) => x.id === brandId);
   const refresh = async () => {
     const requestId=++refreshId.current;
@@ -255,22 +282,13 @@ function App() {
         <a className="logo" href="#" onClick={() => navigate("home")}>
           <BrandLogo />
         </a>
-        <div className="workspace">
-          <span className="workspace-avatar">B</span>
-          <div>
-            <b>Brand workspace</b>
-            <small>Không gian nghiên cứu</small>
-          </div>
-          <ChevronDown size={15} />
-        </div>
         <div className="nav-label">WORKSPACE</div>
         <nav>
           {[
             [Sparkles, "home", "Trang chủ"],
             [LayoutDashboard, "overview", "Tổng quan"],
             [Radio, "feed", "Nguồn nhắc đến"],
-            [Bell, "alerts", "Cảnh báo"],
-            [ShieldCheck, "tickets", "Ticket khủng hoảng"],
+            [Bell, "alerts", "Cảnh báo & xử lý"],
             [Tag, "brands", "Thương hiệu"],
           ].map(([Icon, id, label]) => (
             <button
@@ -286,35 +304,12 @@ function App() {
             </button>
           ))}
         </nav>
-        <div className="nav-label system-label">HỆ THỐNG</div>
-        <button
-          className={tab === "crawler" ? "nav-item active" : "nav-item"}
-          onClick={() => navigate("crawler")}
-        >
-          <Globe size={19} />
-          Trình thu thập
-        </button>
-        <button
-          className={tab === "settings" ? "nav-item active" : "nav-item"}
-          onClick={() => navigate("settings")}
-        >
-          <Settings size={19} />
-          Cấu hình cảnh báo
-        </button>
-        <button className={tab === "analytics" ? "nav-item active" : "nav-item"} onClick={() => navigate("analytics")}><ChartNoAxesCombined size={19} /> Báo cáo SLA</button>
         <div className="sidebar-bottom">
-          <div className="listening-card">
-            <div>
-              <span className="live-dot" /> Lắng nghe để thấu hiểu
-            </div>
-            <p>Mọi cuộc trò chuyện đều mang một tín hiệu.</p>
-            <Activity size={80} strokeWidth={1} />
-          </div>
           <div className="profile">
             <div className="avatar">AD</div>
             <div>
-              <b>Administrator</b>
-              <small>Không gian cục bộ</small>
+              <b>{actor?.name || 'Administrator'}</b>
+              <small>{actor?.role?.toUpperCase() || 'Không gian cục bộ'}</small>
             </div>
             <ShieldCheck size={18} />
           </div>
@@ -329,7 +324,7 @@ function App() {
                 <BrandLogo />
               </a>
               <div className="home-nav-links"><a href="#giai-phap">Giải pháp</a><a href="#quy-trinh">Khám phá</a><a href="#tinh-nang">Tính năng</a></div>
-              <button className="home-settings-icon" aria-label="Mở cấu hình cảnh báo" onClick={() => navigate("settings")}>
+              <button className="home-settings-icon" aria-label="Mở thương hiệu và cấu hình cảnh báo" onClick={() => navigate("brands")}>
                 <Settings size={19}/><span>Cài đặt cảnh báo</span>
               </button>
             </>
@@ -343,17 +338,14 @@ function App() {
                   home: "Trang chủ",
                   overview: "Tổng quan",
                   feed: "Nguồn nhắc đến",
-                  alerts: "Cảnh báo",
-                  tickets: "Ticket khủng hoảng",
+                  alerts: "Cảnh báo & xử lý",
                   brands: "Thương hiệu",
-                  crawler: "Trình thu thập",
-                  settings: "Cấu hình cảnh báo",
-                  analytics: "Báo cáo SLA",
                 }[tab]
               }
             </b>
           </div>
           <div className="topbar-right">
+            <select aria-label="Vai trò đang thao tác" value={actorId} onChange={e => setActorId(e.target.value)}>{staff.map(s => <option key={s.id} value={s.id}>{s.name} · {s.role.toUpperCase()}</option>)}</select>
             <span className="connection">
               <span className={health.api ? "live-dot" : "offline-dot"} />
               {health.api ? "Hệ thống sẵn sàng" : "Đang kết nối"}
@@ -371,7 +363,7 @@ function App() {
             </>
           )}
         </header>
-        <div className={tab === "home" ? "page home-page" : tab === "settings" ? "page settings-page" : "page"}>
+        <div className={tab === "home" ? "page home-page" : "page"}>
           <div className="page-heading">
             <div>
               <div className="eyebrow">HỆ THỐNG LẮNG NGHE MẠNG XÃ HỘI</div>
@@ -381,23 +373,19 @@ function App() {
                     home: "Lắng nghe. Thấu hiểu. Dẫn đầu.",
                     overview: "Lắng nghe thương hiệu của bạn",
                     feed: "Mọi cuộc trò chuyện, một nơi",
-                    alerts: "Phát hiện sớm. Phản hồi kịp thời.",
-                     tickets: "Xử lý có chủ đích. Khép lại đúng hạn.",
+                    alerts: "Phát hiện sớm. Xử lý đúng hạn.",
                     brands: "Thương hiệu đang theo dõi",
-                    crawler: "Kết nối những tín hiệu",
-                    settings: "Cấu hình cảnh báo",
-                     analytics: "Hiệu suất phản hồi",
                   }[tab]
                 }
               </h1>
               <p>
-                {tab === "settings" ? "Chọn tín hiệu cần theo dõi và nơi bạn muốn nhận thông báo." : "Theo dõi cuộc trò chuyện, nắm bắt cảm xúc và chủ động trước rủi ro."}
+                Theo dõi cuộc trò chuyện, nắm bắt cảm xúc và chủ động trước rủi ro.
               </p>
             </div>
-            {tab !== "settings" && tab !== "tickets" && tab !== "analytics" && <button className="button outline" onClick={exportCSV}>
+            <button className="button outline" onClick={exportCSV}>
               <Download size={16} />
               Xuất báo cáo
-            </button>}
+            </button>
           </div>
           <div className="filterbar">
             <div className="filters-left">
@@ -420,7 +408,7 @@ function App() {
               <span className="platform-label">TikTok</span>
               <span className="platform-badge">WEB CÔNG KHAI</span>
             </div>
-            {tab !== "settings" && <div className="filters-right">
+            <div className="filters-right">
               <select aria-label="Nguồn dữ liệu" value={source} onChange={e=>setSource(e.target.value)}><option value="live">TikTok · dữ liệu thật</option><option value="demo">Demo · minh họa</option></select>
               <select
                 aria-label="Khoảng thời gian"
@@ -437,16 +425,16 @@ function App() {
                 onClick={() =>
                   action(
                     () => api("/crawl", { brand_id: brandId }),
-                    "Đã bắt đầu thu thập. Xem tiến độ tại Trình thu thập.",
+                    "Đã bắt đầu thu thập. Xem tiến độ tại Nguồn nhắc đến.",
                   )
                 }
               >
                 <Radio size={16} />
                 Thu thập ngay
               </button>
-            </div>}
+            </div>
           </div>
-          {tab !== 'settings' && source==='live'&&<div className="insight-strip"><Radio size={20}/><div><b>Dữ liệu TikTok thật · {data.posts.length} bài · {data.comments.length} bình luận đã tải</b><p>{data.comments.filter(c=>c.sentiment==='negative').length} bình luận tiêu cực. Chỉ số không lấy được hiển thị “—”. Biểu đồ tính theo thời điểm thu thập; dữ liệu demo được tách riêng.</p></div><button onClick={()=>navigate('crawler')}>Lịch quét từ khóa <ArrowRight size={16}/></button></div>}
+          {source==='live'&&<div className="insight-strip"><Radio size={20}/><div><b>Dữ liệu TikTok thật · {data.posts.length} bài · {data.comments.length} bình luận đã tải</b><p>{data.comments.filter(c=>c.sentiment==='negative').length} bình luận tiêu cực. Chỉ số không lấy được hiển thị “—”. Biểu đồ tính theo thời điểm thu thập; dữ liệu demo được tách riêng.</p></div><button onClick={()=>navigate('feed')}>Lịch quét từ khóa <ArrowRight size={16}/></button></div>}
           {data.posts.some((p) => p.source === "demo") && (
             <div className="demo-note">
               <Sparkles size={14} />
@@ -810,7 +798,7 @@ function App() {
                     </div>
                     <button
                       onClick={() =>
-                        navigate(data.posts.length ? "feed" : "crawler")
+                        navigate("feed")
                       }
                     >
                       Khám phá <ArrowRight size={16} />
@@ -947,19 +935,7 @@ function App() {
                     <div className="empty">
                       <MessageCircle size={28} />
                       <b>Chưa có cuộc trò chuyện nào</b>
-                      <p>Thử đổi bộ lọc hoặc nạp dữ liệu minh họa.</p>
-                      <button
-                        className="button outline"
-                        disabled={busy}
-                        onClick={() =>
-                          action(
-                            () => api("/demo", { brand_id: brandId }),
-                            "Đã nạp dữ liệu minh họa",
-                          )
-                        }
-                      >
-                        Nạp dữ liệu demo
-                      </button>
+                      <p>Thử đổi bộ lọc hoặc dùng phần Thu thập TikTok bên dưới để nạp dữ liệu minh họa.</p>
                     </div>
                   )}
                   <div className="table-footer">
@@ -972,65 +948,64 @@ function App() {
                   </div>
                 </section>
               )}
-              {tab === "tickets" && <TicketDesk brandId={brandId} notify={setToast} refreshDashboard={refresh} />}
-              {tab === "analytics" && <SLAReport brandId={brandId} notify={setToast} />}
-              {tab === "alerts" && (
-                <section className="card padded">
-                  <h2>Trung tâm cảnh báo</h2>
-                  <p className="muted">
-                    Cảnh báo phát sinh từ bình luận thực thu thập trong một giờ,
-                    tối thiểu 5 bình luận. Dữ liệu demo không kích hoạt cảnh
-                    báo.
-                  </p>
-                  {data.alerts.length === 0 ? (
-                    <div className="empty">
-                      <ShieldCheck size={38} />
-                      <b>Chưa có cảnh báo</b>
-                      <p>
-                        Ngưỡng hiện tại: trên {current?.threshold}% bình luận
-                        tiêu cực.
-                      </p>
-                    </div>
-                  ) : (
-                    data.alerts.map((a) => (
-                      <div className="alert-row" key={a.id}>
-                        <div className="metric-icon orange">
-                          <Bell size={20} />
-                        </div>
-                        <div>
-                          <b>{a.reason}</b>
-                          <small>
-                            {new Date(a.created_at).toLocaleString("vi-VN")}
-                          </small>
-                          <small>{a.delivery}</small>
-                        </div>
-                        {a.status === "open" ? (
-                          <button
-                            className="button outline"
-                            onClick={() =>
-                              action(
-                                () => api("/alerts/" + a.id, {}, "PATCH"),
-                                "Đã đánh dấu xử lý",
-                              )
-                            }
-                          >
-                            Đánh dấu đã xử lý
-                          </button>
-                        ) : (
-                          <span className="sentiment-badge positive">
-                            <Check size={14} />
-                            Đã xử lý
-                          </span>
-                        )}
-                      </div>
-                    ))
-                  )}
+              {tab === "overview" && (
+                <section className="overview-analysis" aria-label="Phân tích vận hành nâng cao">
+                  <div className="overview-analysis-header">
+                    <h2>Phân tích vận hành</h2>
+                  </div>
+                  <div className="overview-analysis-grid">
+                    <TopicTrend comments={data.comments} />
+                    <SLAReport brandId={brandId} notify={setToast} />
+                  </div>
+                  <details className="overview-benchmark">
+                    <summary>Đánh giá chất lượng phân loại NLP</summary>
+                    <NLPEvaluation notify={setToast} />
+                  </details>
                 </section>
+              )}
+              {tab === "alerts" && (
+                <>
+                  <section className="card padded">
+                    <div className="card-heading"><div><h2>Cảnh báo cần chú ý</h2><p>Cảnh báo phát sinh từ bình luận thực thu thập trong một giờ, tối thiểu 5 bình luận. Dữ liệu demo không kích hoạt cảnh báo.</p></div><span className="count-badge">{activeAlerts.length} mở</span></div>
+                    {data.alerts.length === 0 ? (
+                      <div className="empty">
+                        <ShieldCheck size={38} />
+                        <b>Chưa có cảnh báo</b>
+                        <p>Ngưỡng hiện tại: trên {current?.threshold}% bình luận tiêu cực.</p>
+                      </div>
+                    ) : (
+                      data.alerts.map((a) => (
+                        <div className="alert-row" key={a.id}>
+                          <div className="metric-icon orange"><Bell size={20} /></div>
+                          <div><b>{a.reason}</b><small>{new Date(a.created_at).toLocaleString("vi-VN")}</small><small>{a.delivery}</small></div>
+                          {a.status === "open" ? (
+                            <button className="button outline" onClick={() => action(() => api("/alerts/" + a.id, {}, "PATCH"), "Đã đánh dấu xử lý")}>Đánh dấu đã xử lý</button>
+                          ) : (
+                            <span className="sentiment-badge positive"><Check size={14} />Đã xử lý</span>
+                          )}
+                        </div>
+                      ))
+                    )}
+                  </section>
+                  <TicketDesk brandId={brandId} notify={setToast} refreshDashboard={refresh} />
+                </>
               )}
               {tab === "brands" && (
                 <>
+                  {current && <div className="settings-layout">
+                    <SettingsPanel
+                      key={current.id + current.threshold + current.keywords}
+                      current={current}
+                      busy={busy}
+                      save={(body) => action(() => api("/brands/" + brandId, body, "PATCH"), "Đã lưu cấu hình cảnh báo")}
+                    />
+                    <ChannelsPanel
+                      current={current}
+                      busy={busy}
+                      save={(body) => action(() => api("/brands/" + brandId + "/channels", body, "PATCH"), "Đã lưu kênh nhận thông báo")}
+                    />
+                  </div>}
                   <div className="section-toolbar">
-                    <h2>{brands.length} thương hiệu trong workspace</h2>
                     <button
                       className="button primary"
                       onClick={() => setModal({ type: "brand" })}
@@ -1039,33 +1014,9 @@ function App() {
                       Thêm thương hiệu
                     </button>
                   </div>
-                  <div className="brand-grid">
-                    {brands.map((b, i) => (
-                      <section className="card brand-card" key={b.id}>
-                        <div className={"brand-avatar brand-" + (i % 3)}>
-                          {b.name[0]}
-                        </div>
-                        <h2>{b.name}</h2>
-                        <p>{b.keywords}</p>
-                        <div>
-                          <span className="live-dot" />
-                          Ngưỡng cảnh báo: {b.threshold}%
-                        </div>
-                        <button
-                          className="button outline"
-                          onClick={() => {
-                            setBrandId(b.id);
-                            navigate("overview");
-                          }}
-                        >
-                          Xem tổng quan <ArrowRight size={16} />
-                        </button>
-                      </section>
-                    ))}
-                  </div>
                 </>
               )}
-              {tab === "crawler" && (
+              {tab === "feed" && (
                 <section className="card padded">
                   <div className="card-heading">
                     <div>
@@ -1110,6 +1061,15 @@ function App() {
                       <Sparkles size={16} />
                       Nạp bộ dữ liệu minh họa
                     </button>
+                    <button
+                      className="button outline"
+                      disabled={busy || !current?.facebook_page_id}
+                      title={current?.facebook_page_id ? 'Đọc Facebook Page qua Meta Graph API' : 'Cấu hình Facebook Page ID trong phần Thương hiệu trước'}
+                      onClick={() => action(() => api('/facebook/crawl', { brand_id: brandId }), 'Đã bắt đầu thu thập Facebook Page qua Meta Graph API.')}
+                    >
+                      <Globe size={16} />
+                      Thu thập Facebook
+                    </button>
                     <span className="muted">
                       NLP:{" "}
                       {health.nlp
@@ -1124,36 +1084,6 @@ function App() {
                   </form></details>
                   <CrawlHistory key={brandId} brandId={brandId} revision={data.jobs} refresh={refresh} notify={setToast}/>
                 </section>
-              )}
-              {tab === "settings" && current && (
-                <div className="settings-layout">
-                  <SettingsPanel
-                    key={current.id + current.threshold + current.keywords}
-                    current={current}
-                    busy={busy}
-                    save={(body) =>
-                      action(
-                        () => api("/brands/" + brandId, body, "PATCH"),
-                        "Đã lưu cấu hình cảnh báo",
-                      )
-                    }
-                  />
-                  <ChannelsPanel
-                    current={current}
-                    busy={busy}
-                    save={(body) =>
-                      action(
-                        () =>
-                          api(
-                            "/brands/" + brandId + "/channels",
-                            body,
-                            "PATCH",
-                          ),
-                        "Đã lưu kênh nhận thông báo",
-                      )
-                    }
-                  />
-                </div>
               )}
             </>
           )}
@@ -1236,7 +1166,7 @@ function App() {
                         <b>@{c.author}</b>
                         {c.parent_id&&<small className="muted"> · Phản hồi bình luận #{c.parent_id}</small>}
                         <p>{c.text}</p>
-                        {modal.post.source==='live'&&<p className="muted">{fmt(c.like_count)} lượt thích · {c.published_at?new Date(c.published_at).toLocaleString('vi-VN'):'Chưa có ngày đăng'} · ID {c.id}</p>}
+                        {modal.post.source==='live'&&<p className="muted">{fmt(c.like_count)} lượt thích · Chủ đề: {c.topic || 'other'} · Độc hại: {Math.round((c.toxicity_score || 0) * 100)}% · Tin cậy: {Math.round((c.confidence || 0) * 100)}% · {c.published_at?new Date(c.published_at).toLocaleString('vi-VN'):'Chưa có ngày đăng'} · ID {c.id}</p>}
                         <span className={"sentiment-badge " + c.sentiment}>
                           {labels[c.sentiment]}
                         </span>
@@ -1319,6 +1249,7 @@ function SettingsPanel({ current, save, busy }) {
           save({
             keywords: new FormData(e.currentTarget).get("keywords"),
             threshold,
+            facebook_page_id: new FormData(e.currentTarget).get("facebook_page_id").trim(),
           });
         }}
       >
@@ -1333,6 +1264,11 @@ function SettingsPanel({ current, save, busy }) {
           <small>
             Phân tách các từ khóa bằng dấu phẩy. Ví dụ: VinFast, VF 3, VF 8.
           </small>
+        </label>
+        <label>
+          Facebook Page ID
+          <input name="facebook_page_id" inputMode="numeric" pattern="[0-9]{5,30}" defaultValue={current.facebook_page_id || ""} placeholder="Ví dụ: 123456789012345" />
+          <small>Chỉ dùng Page ID của Facebook Page mà doanh nghiệp đã cấp quyền đọc qua Meta Graph API.</small>
         </label>
         <label>
           Ngưỡng bình luận tiêu cực{" "}
@@ -1426,13 +1362,13 @@ function ChannelsPanel({ current, busy, save }) {
   );
 }
 const stopLabels={post_limit:'Đạt giới hạn bài/lượt',comment_limit:'Đạt giới hạn bình luận',scroll_limit:'Đạt giới hạn cuộn',no_new_results:'Không tải thêm kết quả',end_of_search_response:'TikTok báo hết trang tìm kiếm',end_of_public_comments:'TikTok báo hết trang bình luận công khai',no_more_loaded:'Không tải thêm bình luận',comments_unavailable:'Không tải được bình luận',page_error:'Lỗi trang',access_required:'Cần đăng nhập/xác minh',not_loaded:'Chưa tải'};
-function JobReport({job}){let r;try{r=JSON.parse(job.report);}catch{}if(!r)return null;return <div className="job-report"><p><b>{r.mode==='keywords'?'Tìm theo từ khóa':'URL tùy chọn'}: {(r.search?.map(s=>s.keyword) || r.keywords)?.join(', ')}</b><br/>{r.discovered} bài phát hiện · {r.saved_posts} bài lưu · {r.saved_comments} bình luận tải · {r.posts_with_comments} bài có bình luận</p><p>Giới hạn: {r.limits?.posts} bài/lượt, {r.limits?.comments_per_post} bình luận/bài. “Hoàn tất lượt” không có nghĩa là đã lấy toàn bộ TikTok.</p><details><summary>Phạm vi dữ liệu từng bài</summary>{r.comment_coverage?.map(c=><p key={c.video_id}>#{c.video_id}: {c.collected}/{c.reported_total??'không rõ'} bình luận · {stopLabels[c.stop_reason]||c.stop_reason}</p>)}</details></div>}
+function JobReport({job}){let r;try{r=JSON.parse(job.report);}catch{}if(!r)return null;const facebook=r.mode==='facebook_page';return <div className="job-report"><p><b>{facebook?'Facebook Page':r.mode==='keywords'?'Tìm theo từ khóa':'URL tùy chọn'}{!facebook&&`: ${(r.search?.map(s=>s.keyword) || r.keywords)?.join(', ')}`}</b><br/>{r.discovered} bài phát hiện · {r.saved_posts} bài lưu · {r.saved_comments} bình luận tải · {r.posts_with_comments} bài có bình luận</p>{!facebook&&<p>Giới hạn: {r.limits?.posts} bài/lượt, {r.limits?.comments_per_post} bình luận/bài. “Hoàn tất lượt” không có nghĩa là đã lấy toàn bộ TikTok.</p>}<details><summary>Phạm vi dữ liệu từng bài</summary>{r.comment_coverage?.map(c=><p key={c.video_id}>#{c.video_id}: {c.collected}/{c.reported_total??'không rõ'} bình luận · {stopLabels[c.stop_reason]||c.stop_reason}</p>)}</details></div>}
 function CrawlHistory({brandId,revision,refresh,notify}) {
   const [checked,setChecked]=useState([]);
-  const selectable=job=>job.status!=='running'&&Boolean(job.tracked_job_id)&&!job.deleted_at;
+  const selectable=job=>job.status!=='running';
   const [page,setPage]=useState({jobs:[],has_more:false}), [cursors,setCursors]=useState([null]);
   const [loading,setLoading]=useState(true), [error,setError]=useState(''), [selection,setSelection]=useState(null);
-  const [previewing,setPreviewing]=useState(null), [deleting,setDeleting]=useState(false);
+  const [deleting,setDeleting]=useState(false);
   const dialog=useRef(null), alive=useRef(true), trigger=useRef(null);
   const before=cursors[cursors.length-1];
   useEffect(()=>{setChecked([]);},[brandId,before]);
@@ -1448,54 +1384,23 @@ function CrawlHistory({brandId,revision,refresh,notify}) {
     if(selection) dialog.current?.showModal();
     else {dialog.current?.close();trigger.current?.focus();}
   },[selection]);
-  async function review(job,event) {
-    trigger.current=event.currentTarget;
-    setPreviewing(job.id);
-    try { const summary=await api(`/jobs/${job.id}/data`); if(alive.current)setSelection({job,summary}); }
-    catch(e){notify(e.message);}
-    finally{if(alive.current)setPreviewing(null);}
-  }
-  async function reviewMany(event) {
-    trigger.current=event.currentTarget;
-    setPreviewing('bulk');
-    try {
-      const jobs=page.jobs.filter(job=>checked.includes(job.id)&&selectable(job));
-      const summaries=await Promise.all(jobs.map(job=>api(`/jobs/${job.id}/data`)));
-      if(alive.current&&jobs.length)setSelection({jobs,summaries});
-    } catch(e){notify(e.message);}
-    finally{if(alive.current)setPreviewing(null);}
-  }
-  async function remove() {
+  async function removeHistories() {
     setDeleting(true);
-    if(selection.jobs) {
-      const done=[],failed=[];
-      let posts=0,comments=0;
-      for(const job of selection.jobs) {
-        try {
-          const result=await api(`/jobs/${job.id}/data`,{confirm_job_id:job.id},'DELETE');
-          done.push(job.id);posts+=result.posts;comments+=result.comments;
-        } catch(e){failed.push(`#${job.id}: ${e.message}`);}
-      }
-      if(alive.current){setChecked(ids=>ids.filter(id=>!done.includes(id)));setSelection(null);setDeleting(false);}
-      notify(`Đã xoá dữ liệu ${done.length}/${selection.jobs.length} lượt: ${posts} bài, ${comments} bình luận.${failed.length?' Chưa xoá: '+failed.join('; '):''}`);
-      if(alive.current&&failed.length)setError('Chưa xoá: '+failed.join('; '));
-      await refresh();
-      return;
-    }
+    const ids=selection.jobs.map(job=>job.id);
     try {
-      const result=await api(`/jobs/${selection.job.id}/data`,{confirm_job_id:selection.job.id},'DELETE');
-      notify(`Đã xoá ${result.posts} bài và ${result.comments} bình luận của lượt #${selection.job.id}.`);
-      if(alive.current)setSelection(null);
+      await api('/jobs/history',{job_ids:ids,confirm_job_ids:ids},'DELETE');
+      notify(`Đã xoá lịch sử ${ids.length} tác vụ.`);
+      if(alive.current){setChecked(current=>current.filter(id=>!ids.includes(id)));setSelection(null);}
       await refresh();
     } catch(e){notify(e.message);}
     finally{if(alive.current)setDeleting(false);}
   }
   return <div className="crawl-history">
     <h2 className="jobs-heading">Lịch sử thu thập</h2>
-    <p className="muted">Xoá dữ liệu riêng của một lượt quét đã kết thúc. Dữ liệu dùng chung với lượt khác được giữ lại.</p>
+    <p className="muted">Xoá lịch sử của các lượt quét đã kết thúc. Dữ liệu thu thập vẫn được giữ lại trên dashboard.</p>
     <div className="job-data-actions">
-      <label><input type="checkbox" aria-label="Chọn tất cả lượt có thể xoá trên trang" disabled={loading||deleting||previewing!==null||!page.jobs.some(selectable)} checked={page.jobs.some(selectable)&&page.jobs.filter(selectable).every(job=>checked.includes(job.id))} onChange={e=>setChecked(e.target.checked?page.jobs.filter(selectable).map(job=>job.id):[])}/> Chọn tất cả trên trang</label>
-      <button type="button" className="button danger-outline" disabled={!checked.length||loading||deleting||previewing!==null} onClick={reviewMany}><Trash2 size={15}/>{previewing==='bulk'?'Đang kiểm tra…':`Xoá dữ liệu các lượt đã chọn (${checked.length})`}</button>
+      <label><input type="checkbox" aria-label="Chọn tất cả lịch sử có thể xoá trên trang" disabled={loading||deleting||!page.jobs.some(selectable)} checked={page.jobs.some(selectable)&&page.jobs.filter(selectable).every(job=>checked.includes(job.id))} onChange={e=>setChecked(e.target.checked?page.jobs.filter(selectable).map(job=>job.id):[])}/> Chọn tất cả trên trang</label>
+      <button type="button" className="button danger-outline" disabled={!checked.length||loading||deleting} onClick={event=>{trigger.current=event.currentTarget;setSelection({jobs:page.jobs.filter(job=>checked.includes(job.id)&&selectable(job))});}}><Trash2 size={15}/>{`Xoá lịch sử đã chọn (${checked.length})`}</button>
     </div>
     {error&&<p role="alert">{error}</p>}
     {loading&&!page.jobs.length&&<p role="status">Đang tải lịch sử…</p>}
@@ -1503,48 +1408,33 @@ function CrawlHistory({brandId,revision,refresh,notify}) {
     {page.jobs.map(job=><div className="job" key={job.id}>
       <span className={'job-status '+job.status}>{job.status==='running'?'Đang chạy':job.status==='completed'?'Hoàn tất lượt':job.status==='partial'?'Dữ liệu một phần':'Không thành công'}</span>
       <div className="job-content">
-        <label><input type="checkbox" aria-label={`Chọn lượt #${job.id}`} disabled={!selectable(job)||deleting||previewing!==null} checked={checked.includes(job.id)} onChange={e=>setChecked(ids=>e.target.checked?[...ids,job.id]:ids.filter(id=>id!==job.id))}/> Chọn lượt này</label>
+        <label><input type="checkbox" aria-label={`Chọn lịch sử tác vụ #${job.id}`} disabled={!selectable(job)||deleting} checked={checked.includes(job.id)} onChange={e=>setChecked(ids=>e.target.checked?[...ids,job.id]:ids.filter(id=>id!==job.id))}/> Chọn lịch sử này</label>
         <b>Tác vụ #{job.id}</b>
-        {job.deleted_at&&<p className="job-data-deleted">Đã xoá dữ liệu lượt này · {new Date(job.deleted_at).toLocaleString('vi-VN')}</p>}
         <JobReport job={job}/>
         <details open={job.status==='running'}><summary>Nhật ký chi tiết</summary><pre>{job.message}</pre></details>
         <small>{new Date(job.created_at).toLocaleString('vi-VN')}</small>
         <div className="job-data-actions">
-          <button type="button" className="button danger-outline" aria-label={`Xoá dữ liệu lượt #${job.id}`}
-            disabled={job.status==='running'||!job.tracked_job_id||Boolean(job.deleted_at)||previewing!==null||deleting}
-            onClick={event=>review(job,event)}><Trash2 size={15}/>{previewing===job.id?'Đang kiểm tra…':'Xoá dữ liệu lượt này'}</button>
-          {!job.tracked_job_id&&<small>Lượt cũ chưa ghi liên kết dữ liệu, không thể xoá riêng an toàn.</small>}
+          <button type="button" className="button danger-outline" aria-label={`Xoá lịch sử tác vụ #${job.id}`}
+            disabled={job.status==='running'||deleting}
+            onClick={event=>{trigger.current=event.currentTarget;setSelection({jobs:[job]});}}><Trash2 size={15}/>Xoá lịch sử tác vụ</button>
           {job.status==='running'&&<small>Chỉ xoá được sau khi lượt quét kết thúc.</small>}
         </div>
       </div>
     </div>)}
     <div className="history-pagination">
-      <button type="button" className="button outline" disabled={loading||deleting||previewing!==null||cursors.length===1} onClick={()=>setCursors(c=>c.slice(0,-1))}>Lượt mới hơn</button>
+      <button type="button" className="button outline" disabled={loading||deleting||cursors.length===1} onClick={()=>setCursors(c=>c.slice(0,-1))}>Lượt mới hơn</button>
       <span>Trang {cursors.length}</span>
-      <button type="button" className="button outline" disabled={loading||deleting||previewing!==null||!page.has_more} onClick={()=>setCursors(c=>[...c,page.jobs.at(-1).id])}>Lượt cũ hơn</button>
+      <button type="button" className="button outline" disabled={loading||deleting||!page.has_more} onClick={()=>setCursors(c=>[...c,page.jobs.at(-1).id])}>Lượt cũ hơn</button>
     </div>
     <dialog ref={dialog} className="delete-run-dialog" aria-labelledby="delete-run-title" onCancel={event=>{event.preventDefault();if(!deleting)setSelection(null);}}>
       {selection?.jobs&&<>
-        <h2 id="delete-run-title">Xoá dữ liệu {selection.jobs.length} lượt đã chọn?</h2>
+        <h2 id="delete-run-title">Xoá lịch sử {selection.jobs.length} tác vụ đã chọn?</h2>
         <p>Các lượt: {selection.jobs.map(job=>`#${job.id}`).join(', ')}.</p>
-        <p>Xoá lần lượt từng lượt đã chọn. Dữ liệu chỉ dùng chung giữa các lượt đã chọn có thể được xoá ở lượt cuối; dữ liệu còn dùng bởi lượt khác hoặc dữ liệu cũ được giữ lại.</p>
-        <p>Không thể hoàn tác. Lịch sử tác vụ, cảnh báo và file evidence được giữ lại. Nếu có lượt lỗi, các lượt đã xoá thành công vẫn được giữ kết quả và lỗi sẽ được báo riêng.</p>
-        {selection.summaries.filter(s=>!s.can_delete).map(s=><p role="alert" key={s.job_id}>#{s.job_id}: {s.reason}</p>)}
+        <p>Thao tác xoá vĩnh viễn mã tác vụ, trạng thái, báo cáo và nhật ký. Dữ liệu bài viết và bình luận đã thu thập vẫn được giữ lại.</p>
+        <p>Không thể hoàn tác.</p>
         <div className="delete-run-actions">
           <button type="button" className="button outline" autoFocus disabled={deleting} onClick={()=>setSelection(null)}>Huỷ</button>
-          <button type="button" className="button danger" disabled={deleting||selection.summaries.some(s=>!s.can_delete)} onClick={remove}>{deleting?'Đang xoá…':'Xác nhận xoá các lượt đã chọn'}</button>
-        </div>
-      </>}
-      {selection&&!selection.jobs&&<>
-        <h2 id="delete-run-title">Xoá dữ liệu lượt #{selection.job.id}?</h2>
-        {selection.summary.can_delete?<>
-          <p>Sẽ xoá <b>{selection.summary.posts} bài viết</b> và <b>{selection.summary.comments} bình luận</b> chỉ thuộc lượt này.</p>
-          <p>Giữ lại {selection.summary.retained_posts} bài và {selection.summary.retained_comments} bình luận dùng chung hoặc đã có từ trước.</p>
-          <p>Thao tác không thể hoàn tác trong ứng dụng. Dashboard sẽ cập nhật sau khi xoá. Lịch sử tác vụ, cảnh báo và file evidence được giữ lại; báo cáo quét vẫn thể hiện kết quả ban đầu.</p>
-        </>:<p role="status">{selection.summary.reason}</p>}
-        <div className="delete-run-actions">
-          <button type="button" className="button outline" autoFocus disabled={deleting} onClick={()=>setSelection(null)}>Huỷ</button>
-          {selection.summary.can_delete&&<button type="button" className="button danger" disabled={deleting} onClick={remove}>{deleting?'Đang xoá…':'Xác nhận xoá dữ liệu'}</button>}
+          <button type="button" className="button danger" disabled={deleting} onClick={removeHistories}>{deleting?'Đang xoá…':'Xác nhận xoá lịch sử'}</button>
         </div>
       </>}
     </dialog>

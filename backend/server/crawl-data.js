@@ -40,45 +40,26 @@ export async function createCrawlData(db) {
     }
     await db.prepare('INSERT INTO crawl_comment_sources(comment_id,post_id,job_id) VALUES(?,?,?) ON CONFLICT(comment_id,post_id,job_id) DO UPDATE SET job_id=excluded.job_id').run(commentId,postId,jobId);
   }
-  async function inspect(jobId) {
-    const job = await db.prepare('SELECT j.*,r.job_id AS tracked_job_id,r.deleted_at FROM jobs j LEFT JOIN crawl_data_runs r ON r.job_id=j.id WHERE j.id=?').get(jobId);
-    if (!job) fail('Không tìm thấy lượt quét',404);
-    if (!job.tracked_job_id) return { job_id: jobId, tracked: false, can_delete: false, reason: 'Lượt quét cũ chưa có liên kết dữ liệu; không thể xoá riêng an toàn.' };
-    const posts = await db.prepare('SELECT s.post_id FROM crawl_post_sources s WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM crawl_post_sources other WHERE other.post_id=s.post_id AND other.job_id<>?)').all(jobId,jobId);
-    const comments = await db.prepare('SELECT s.comment_id,s.post_id FROM crawl_comment_sources s WHERE s.job_id=? AND NOT EXISTS (SELECT 1 FROM crawl_comment_sources other WHERE other.comment_id=s.comment_id AND other.post_id=s.post_id AND other.job_id<>?)').all(jobId,jobId);
-    const totalPosts = Number((await db.prepare('SELECT COUNT(*) AS total FROM crawl_post_sources WHERE job_id=?').get(jobId)).total);
-    const totalComments = Number((await db.prepare('SELECT COUNT(*) AS total FROM crawl_comment_sources WHERE job_id=?').get(jobId)).total);
-    // Keep a post if any comment is not exclusive to this run (including legacy).
-    const deletablePosts = [];
-    for (const post of posts) {
-      const retained = await db.prepare('SELECT c.id FROM comments c WHERE c.post_id=? AND (NOT EXISTS (SELECT 1 FROM crawl_comment_sources s WHERE s.post_id=c.post_id AND s.comment_id=c.id AND s.job_id=?) OR EXISTS (SELECT 1 FROM crawl_comment_sources s WHERE s.post_id=c.post_id AND s.comment_id=c.id AND s.job_id<>?)) LIMIT 1').get(post.post_id,jobId,jobId);
-      if (!retained) deletablePosts.push(post);
-    }
-    const running = await db.prepare("SELECT id FROM jobs WHERE brand_id=? AND status='running' LIMIT 1").get(job.brand_id);
-    return { job_id: jobId, tracked: true, deleted_at: job.deleted_at,
-      can_delete: !job.deleted_at && !running,
-      reason: job.deleted_at ? 'Dữ liệu lượt này đã được xoá.' : running ? 'Chờ lượt quét đang chạy của thương hiệu kết thúc.' : '',
-      posts: deletablePosts.length, comments: comments.length,
-      retained_posts: totalPosts-deletablePosts.length, retained_comments: totalComments-comments.length,
-      postRows: deletablePosts, commentRows: comments };
-  }
-  async function preview(jobId) {
-    const { postRows, commentRows, ...summary } = await inspect(jobId);
-    return summary;
-  }
-  async function remove(jobId) {
+  async function removeHistories(jobIds) {
     return exclusive(() => db.transaction(async () => {
-      const summary = await inspect(jobId);
-      if (summary.deleted_at) return { already_deleted: true, posts: 0, comments: 0 };
-      if (!summary.can_delete) fail(summary.reason);
-      // Delete only rows selected by provenance, never by date ranges/video report.
-      await db.prepare('DELETE FROM comments WHERE EXISTS (SELECT 1 FROM crawl_comment_sources s WHERE s.comment_id=comments.id AND s.post_id=comments.post_id AND s.job_id=?) AND NOT EXISTS (SELECT 1 FROM crawl_comment_sources s WHERE s.comment_id=comments.id AND s.post_id=comments.post_id AND s.job_id<>?)').run(jobId,jobId);
-      await db.prepare('DELETE FROM posts WHERE EXISTS (SELECT 1 FROM crawl_post_sources s WHERE s.post_id=posts.id AND s.job_id=?) AND NOT EXISTS (SELECT 1 FROM crawl_post_sources s WHERE s.post_id=posts.id AND s.job_id<>?) AND NOT EXISTS (SELECT 1 FROM comments c WHERE c.post_id=posts.id)').run(jobId,jobId);
-      await db.prepare('DELETE FROM crawl_comment_sources WHERE job_id=?').run(jobId);
-      await db.prepare('DELETE FROM crawl_post_sources WHERE job_id=?').run(jobId);
-      await db.prepare('UPDATE crawl_data_runs SET deleted_at=? WHERE job_id=?').run(new Date().toISOString(),jobId);
-      return { posts: summary.posts, comments: summary.comments, retained_posts: summary.retained_posts, retained_comments: summary.retained_comments };
+      const jobs=[];
+      for (const jobId of jobIds) {
+        const job=await db.prepare('SELECT j.*,r.job_id AS tracked_job_id FROM jobs j LEFT JOIN crawl_data_runs r ON r.job_id=j.id WHERE j.id=?').get(jobId);
+        if (!job) fail('Không tìm thấy lượt quét', 404);
+        if (job.status === 'running') fail('Không thể xoá lịch sử của lượt quét đang chạy.');
+        jobs.push(job);
+      }
+      for (const job of jobs) {
+        // Only provenance is removed. Posts and comments remain available in the dashboard.
+        if (job.tracked_job_id) {
+          await db.prepare('DELETE FROM crawl_comment_sources WHERE job_id=?').run(job.id);
+          await db.prepare('DELETE FROM crawl_post_sources WHERE job_id=?').run(job.id);
+          await db.prepare('DELETE FROM crawl_data_runs WHERE job_id=?').run(job.id);
+        }
+        await db.prepare('DELETE FROM jobs WHERE id=?').run(job.id);
+      }
+      return { deleted_job_ids: jobs.map(job=>job.id) };
     }));
   }
-  return { exclusive, register, validateIngest, recordPost, recordComment, preview, remove };
+  return { exclusive, register, validateIngest, recordPost, recordComment, removeHistories };
 }
