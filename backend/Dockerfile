@@ -8,5 +8,6 @@ RUN python3 -m venv /opt/venv && /opt/venv/bin/pip install --no-cache-dir -r pyt
 ENV PATH="/opt/venv/bin:$PATH"
 COPY server ./server
 COPY python ./python
+COPY sql ./sql
 EXPOSE 3001
 CMD ["sh", "-c", "/opt/venv/bin/python python/service.py & exec node server/index.js"]
