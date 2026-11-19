@@ -72,8 +72,9 @@ const ratioPct = (part, total) => {
   return Number.isFinite(numerator) && Number.isFinite(denominator) && denominator > 0 ? `${Math.round(numerator / denominator * 100)}%` : '0%';
 };
 async function api(path, body, method = "POST") {
+  const apiBase = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
   const r = await fetch(
-    "/api" + path,
+    apiBase + "/api" + path,
     body === undefined
       ? {}
       : {

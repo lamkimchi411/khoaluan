@@ -35,6 +35,13 @@ if (!(await db.prepare('SELECT id FROM staff LIMIT 1').get())) {
 }
 const app = express();
 const execFileAsync = promisify(execFile);
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Actor-ID');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 app.use(express.json({
   limit: '2mb'
 }));
