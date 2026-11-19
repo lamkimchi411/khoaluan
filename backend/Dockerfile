@@ -9,4 +9,4 @@ ENV PATH="/opt/venv/bin:$PATH"
 COPY server ./server
 COPY python ./python
 EXPOSE 3001
-CMD ["node", "server/index.js"]
+CMD ["sh", "-c", "/opt/venv/bin/python python/service.py & exec node server/index.js"]
