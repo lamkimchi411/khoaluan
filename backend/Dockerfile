@@ -1,6 +1,6 @@
 FROM node:24-bookworm-slim
 WORKDIR /app
-RUN apt-get update && apt-get install -y python3 python3-venv && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y python3 python3-venv libatomic1 && rm -rf /var/lib/apt/lists/*
 COPY package.json ./
 RUN npm install --omit=dev
 COPY python/requirements.txt ./python/requirements.txt
